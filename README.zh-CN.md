@@ -150,7 +150,7 @@ api_access_key_env = "JMS_ACCESS_KEY_ID"
 api_secret_key_env = "JMS_ACCESS_KEY_SECRET"
 ssh_username = "hermes-ops"
 ssh_password_host_id = "<existing-vault-host-id>"
-koko_host = "jump.n.nickdlk.cn"
+koko_host = "<jumpserver-koko-host>"
 koko_port = 32222
 verify_tls = false
 ```
