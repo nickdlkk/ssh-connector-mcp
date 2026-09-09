@@ -789,6 +789,28 @@ impl SessionManager {
     /// Open a new persistent PTY session on a host.
     pub async fn open_pty(&self, host_id: &str, rows: u16, cols: u16) -> Result<SessionInfo> {
         let conn = self.pool.get_or_connect(host_id).await?;
+        self.open_pty_on_connection(host_id, conn, rows, cols).await
+    }
+
+    /// Open a PTY on a runtime-only connection (for example a JumpServer target).
+    pub async fn open_pty_on_config(
+        &self,
+        host_id: &str,
+        cfg: &crate::types::HostConfig,
+        rows: u16,
+        cols: u16,
+    ) -> Result<SessionInfo> {
+        let conn = self.pool.get_or_connect_config(host_id, cfg).await?;
+        self.open_pty_on_connection(host_id, conn, rows, cols).await
+    }
+
+    async fn open_pty_on_connection(
+        &self,
+        host_id: &str,
+        conn: Arc<Connection>,
+        rows: u16,
+        cols: u16,
+    ) -> Result<SessionInfo> {
         let id = Self::gen_session_id();
         let handle = PtySession::open(&conn, id.clone(), host_id.to_string(), rows, cols).await?;
         let info = self.info_for(&handle).await;

@@ -480,6 +480,23 @@ fieldset legend { padding: 0 7px; }
 .xterm-container { background: #120d0b; padding: 10px; min-height: 340px; }
 
 .audit-list { padding: 18px 32px 32px; display: flex; flex-direction: column; gap: 8px; }
+.jumpserver-accounts-panel {
+  margin: 0 32px 32px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius);
+  background: rgba(255,255,255,.68);
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+}
+.subpanel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+.subpanel-header h3 { font: 600 20px/1.25 var(--font-literary); color: var(--color-text); margin-top: 5px; }
+.jumpserver-accounts-panel .data-table { min-width: 620px; }
 .audit-entry {
   display: grid;
   grid-template-columns: 180px 120px minmax(120px, 1fr) minmax(220px, 2fr);

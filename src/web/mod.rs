@@ -31,6 +31,8 @@ pub fn router(state: Shared, static_dir: std::path::PathBuf) -> Router {
         .route("/vault/init", post(vault_init))
         .route("/vault/unlock", post(vault_unlock))
         .route("/hosts", get(get_hosts).post(add_host))
+        .route("/jumpserver/assets", get(get_jumpserver_assets))
+        .route("/jumpserver/assets/{asset_id}/accounts", get(get_jumpserver_accounts))
         .route("/hosts/{id}", put(update_host).delete(remove_host))
         .route("/hosts/{id}/connect", post(connect_host))
         .route("/hosts/{id}/disconnect", post(disconnect_host))
@@ -124,6 +126,21 @@ async fn get_hosts(State(st): State<Shared>) -> ApiResult {
 async fn add_host(State(st): State<Shared>, Json(spec): Json<HostSpec>) -> ApiResult {
     let id = st.add_host(spec).map_err(ApiError::from)?;
     Ok(Json(json!({ "host_id": id })))
+}
+
+// --- JumpServer inventory ---
+
+async fn get_jumpserver_assets(State(st): State<Shared>) -> ApiResult {
+    let assets = st.jumpserver_assets().await.map_err(ApiError::from)?;
+    Ok(Json(json!({ "assets": assets })))
+}
+
+async fn get_jumpserver_accounts(
+    State(st): State<Shared>,
+    Path(asset_id): Path<String>,
+) -> ApiResult {
+    let accounts = st.jumpserver_accounts(&asset_id).await.map_err(ApiError::from)?;
+    Ok(Json(json!({ "accounts": accounts })))
 }
 
 async fn update_host(

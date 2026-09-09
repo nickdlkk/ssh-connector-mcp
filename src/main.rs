@@ -4,6 +4,7 @@ mod types;
 mod audit;
 mod config;
 mod daemon;
+mod jumpserver;
 mod mcp;
 mod session;
 mod ssh;

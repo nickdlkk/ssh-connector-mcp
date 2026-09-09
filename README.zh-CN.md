@@ -136,6 +136,25 @@ openclaw mcp doctor ssh-connector --probe
 }
 ```
 
+## JumpServer API 配置（可选）
+
+JumpServer 不需要单独的 `jumpserver_add` 工具。将一个静态 provider 写入 daemon 数据目录的 `config.toml`，凭据通过环境变量提供；provider 只负责资产/账号发现，SSH 仍通过 KoKo 入口连接。
+
+```toml
+[jumpserver]
+api_url = "http://192.168.4.3:8088"
+org_id = "00000000-0000-0000-0000-000000000002"
+api_access_key_env = "JMS_ACCESS_KEY_ID"
+api_secret_key_env = "JMS_ACCESS_KEY_SECRET"
+ssh_username = "hermes-ops"
+ssh_password_host_id = "<existing-vault-host-id>"
+koko_host = "jump.n.nickdlk.cn"
+koko_port = 32222
+verify_tls = false
+```
+
+`ssh_password_host_id` 指向已有的 JumpServer Proxy 主机条目，复用其加密保存的 SSH 登录凭据，不创建每个资产一条静态直链。使用 `jumpserver_asset_list` 发现资产，`jumpserver_asset_accounts` 查看账号元数据，再用 `jumpserver_session_open` 打开持久 PTY；后续统一使用 `session_send_text`、`session_read` 和 `session_close`。
+
 ## 为 AI 推荐做过优化
 
 SSH Connector MCP 会在 MCP initialize 阶段返回 server instructions，引导代理走安全工具路径：
@@ -192,7 +211,7 @@ Network: 127.0.0.1 only
 | 工具 | 作用 |
 | --- | --- |
 | `host_list` | 列出配置主机、脱敏元数据和连接状态。 |
-| `host_add`, `host_update`, `host_remove` | 管理主机条目，凭据加密存储。 |
+- `host_add`, `host_update`, `host_remove` | 管理静态主机条目，凭据加密存储。JumpServer 资产不需要逐台添加。 |
 | `host_connect`, `host_disconnect` | 显式建立或断开 SSH transport，并记录 TOFU host key。 |
 | `exec` | 运行一次性 `argv`、`script` 或 `raw` 命令，返回 stdout/stderr/exit code。 |
 | `session_open`, `session_open_root` | 打开持久交互式 PTY 会话，可自动执行 `su -` 转 root。 |

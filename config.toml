@@ -1,0 +1,20 @@
+web_port = 7600
+mcp_port = 7601
+exec_timeout_ms = 120000
+exec_output_cap_bytes = 1048576
+pty_idle_ttl_secs = 1800
+keepalive_secs = 30
+max_channels_per_host = 8
+
+# Static JumpServer API provider. Credentials are referenced by environment names.
+# Existing host 9f58324e0496db15 supplies the encrypted JumpServer SSH password.
+[jumpserver]
+api_url = "http://192.168.4.3:8088"
+org_id = "00000000-0000-0000-0000-000000000002"
+api_access_key_env = "JMS_ACCESS_KEY_ID"
+api_secret_key_env = "JMS_ACCESS_KEY_SECRET"
+ssh_username = "hermes-ops"
+ssh_password_host_id = "9f58324e0496db15"
+koko_host = "jump.n.nickdlk.cn"
+koko_port = 32222
+verify_tls = false

@@ -13,6 +13,7 @@
 use crate::error::ConnectorError;
 use crate::state::AppState;
 use crate::types::{ExecPayload, HostSpec, KeyName};
+use crate::jumpserver::{Account, Asset};
 use base64::Engine;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -232,6 +233,31 @@ use crate::types::{DirEntry, HostSummary, SessionInfo};
 #[derive(Debug, serde::Serialize, JsonSchema)]
 pub struct HostListResult {
     pub hosts: Vec<HostSummary>,
+}
+
+#[derive(Debug, serde::Serialize, JsonSchema)]
+pub struct JumpServerAssetListResult {
+    pub assets: Vec<Asset>,
+}
+
+#[derive(Debug, serde::Serialize, JsonSchema)]
+pub struct JumpServerAccountListResult {
+    pub accounts: Vec<Account>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JumpServerAssetAccountsRequest {
+    pub asset_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JumpServerSessionOpenRequest {
+    pub asset_id: String,
+    pub account_id: String,
+    #[serde(default = "default_rows")]
+    pub rows: u16,
+    #[serde(default = "default_cols")]
+    pub cols: u16,
 }
 
 #[derive(Debug, serde::Serialize, JsonSchema)]
@@ -515,6 +541,30 @@ impl McpServer {
         Ok(Json(r))
     }
 
+    #[tool(description = "List assets available from the configured JumpServer API. Returns metadata only; no credentials or secrets.")]
+    async fn jumpserver_asset_list(&self) -> Result<Json<JumpServerAssetListResult>, ErrorData> {
+        let assets = self.state.jumpserver_assets().await.map_err(err_to_mcp)?;
+        Ok(Json(JumpServerAssetListResult { assets }))
+    }
+
+    #[tool(description = "List JumpServer-managed accounts for an asset discovered by jumpserver_asset_list. Returns account metadata only; credentials are never returned.")]
+    async fn jumpserver_asset_accounts(
+        &self,
+        Parameters(req): Parameters<JumpServerAssetAccountsRequest>,
+    ) -> Result<Json<JumpServerAccountListResult>, ErrorData> {
+        let accounts = self.state.jumpserver_accounts(&req.asset_id).await.map_err(err_to_mcp)?;
+        Ok(Json(JumpServerAccountListResult { accounts }))
+    }
+
+    #[tool(description = "Open a persistent PTY through JumpServer for an API-discovered asset/account. Prefer this over host_add and session_open for JumpServer-managed assets; reuse the returned session_id with session_send_text and session_read.")]
+    async fn jumpserver_session_open(
+        &self,
+        Parameters(req): Parameters<JumpServerSessionOpenRequest>,
+    ) -> Result<Json<crate::types::SessionInfo>, ErrorData> {
+        let info = self.state.jumpserver_asset_session(&req.asset_id, &req.account_id, req.rows, req.cols).await.map_err(err_to_mcp)?;
+        Ok(Json(info))
+    }
+
     #[tool(
         description = "Open a persistent interactive PTY session (stateful shell) on a host. Returns session metadata including session_id."
     )]
@@ -782,18 +832,16 @@ impl ServerHandler for McpServer {
             "SSH maintenance connector. When the user asks to operate SSH hosts, remote Linux \
              machines, VPS instances, or server-side files and commands that are available in this \
              connector, prefer these MCP tools over spawning local `ssh`, `scp`, or `sftp` shell \
-             commands. Start with `host_list` to discover configured hosts and connection state; \
-             use `host_connect` only when an explicit connection check is needed because `exec`, \
-             PTY, and SFTP operations connect on demand. Hosts and credentials are managed by a \
-             human via a separate Web UI; you can create/update hosts and reference them by \
-             host_id, but you can never read stored credentials. Prefer `exec` with the `argv` \
-             payload for one-shot commands because it is auto-quoted. Use `script` for multi-line \
-             non-interactive work, `raw` only when you intentionally own shell quoting, \
-             `session_open` for stateful interactive work (editors, REPLs, prompts), \
-             `session_open_root` when the host is configured to log in as a normal user and then \
-             run `su -` to root, text SFTP for UTF-8 files, `sftp_download_file`/`sftp_upload_file` \
-             for large binary files, archives, packages, images, APKs, and exact-byte file transfer, \
-             and base64 SFTP tools only for small binary payloads that safely fit in MCP context.",
+             commands. Start with `host_list` to discover configured hosts and connection state. When JumpServer \
+             API is configured, use `jumpserver_asset_list` to discover authorized assets, then \
+             prefer `jumpserver_session_open` for a persistent PTY; reuse its returned session_id \
+             with `session_send_text` and `session_read` for the full operation. Do not manually \
+             add a host for each JumpServer asset. Use `host_connect` only for explicit checks of \
+             persisted hosts. Hosts and credentials are managed by a human via the Web UI or \
+             config-file provider; credentials are never returned. Use `exec` only for isolated \
+             one-shot commands, `script` for multi-line non-interactive work, `raw` only when you \
+             intentionally own shell quoting, `session_open` for stateful interactive work, \
+             `session_open_root` for configured su escalation, and SFTP tools for file transfer.",
         )
     }
 }

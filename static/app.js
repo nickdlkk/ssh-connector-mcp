@@ -16,6 +16,7 @@ const state = {
   termInstance: null,
   termFitAddon: null,
   activeTermSessionId: null,
+  jumpserverAssets: [],
   inflightButtons: new Set(),
 };
 
@@ -41,6 +42,20 @@ const el = {
   hostsTableWrap:   () => $('hosts-table-wrap'),
   hostsBody:        () => $('hosts-body'),
   addHostBtn:       () => $('add-host-btn'),
+  // JumpServer
+  jumpserverStatus: () => $('jumpserver-status'),
+  jumpserverLoading: () => $('jumpserver-loading'),
+  jumpserverEmpty: () => $('jumpserver-empty'),
+  jumpserverTableWrap: () => $('jumpserver-table-wrap'),
+  jumpserverBody: () => $('jumpserver-body'),
+  jumpserverRefresh: () => $('jumpserver-refresh'),
+  jumpserverAccountsPanel: () => $('jumpserver-accounts-panel'),
+  jumpserverAccountsTitle: () => $('jumpserver-accounts-title'),
+  jumpserverAccountsClose: () => $('jumpserver-accounts-close'),
+  jumpserverAccountsLoading: () => $('jumpserver-accounts-loading'),
+  jumpserverAccountsEmpty: () => $('jumpserver-accounts-empty'),
+  jumpserverAccountsTableWrap: () => $('jumpserver-accounts-table-wrap'),
+  jumpserverAccountsBody: () => $('jumpserver-accounts-body'),
   // Sessions
   sessionsStatus:   () => $('sessions-status'),
   sessionsLoading:  () => $('sessions-loading'),
@@ -124,6 +139,8 @@ const api = {
   vaultInit:       (mp)     => apiFetch('POST',   '/vault/init',   { master_password: mp }),
   vaultUnlock:     (mp)     => apiFetch('POST',   '/vault/unlock', { master_password: mp }),
   getHosts:        ()       => apiFetch('GET',    '/hosts'),
+  getJumpServerAssets: () => apiFetch('GET', '/jumpserver/assets'),
+  getJumpServerAccounts: (id) => apiFetch('GET', `/jumpserver/assets/${encodeURIComponent(id)}/accounts`),
   addHost:         (body)   => apiFetch('POST',   '/hosts',        body),
   updateHost:      (id, b)  => apiFetch('PUT',    `/hosts/${id}`,  b),
   deleteHost:      (id)     => apiFetch('DELETE', `/hosts/${id}`),
@@ -167,6 +184,7 @@ function switchView(viewName) {
   });
   // Load data for the view
   if (viewName === 'hosts')    loadHosts();
+  if (viewName === 'jumpserver') loadJumpServerAssets();
   if (viewName === 'sessions') loadSessions();
   if (viewName === 'audit')    loadAudit();
   // Stop sessions poller when leaving sessions view
@@ -643,6 +661,89 @@ function closeRevealModal() {
   revealTargetHostId = null;
 }
 
+// ── JumpServer view ─────────────────────────────────────────────
+async function loadJumpServerAssets() {
+  el.jumpserverLoading().classList.remove('hidden');
+  el.jumpserverEmpty().classList.add('hidden');
+  el.jumpserverTableWrap().classList.add('hidden');
+  el.jumpserverStatus().classList.add('hidden');
+  try {
+    const data = await api.getJumpServerAssets();
+    state.jumpserverAssets = Array.isArray(data) ? data : (data.assets || []);
+    renderJumpServerAssets();
+  } catch (e) {
+    showStatus(el.jumpserverStatus(), describeError(e), 'error');
+  } finally {
+    el.jumpserverLoading().classList.add('hidden');
+  }
+}
+
+function groupText(value) {
+  if (!value) return '—';
+  const values = Array.isArray(value) ? value : [value];
+  return values.map((item) => {
+    if (typeof item === 'string' || typeof item === 'number') return String(item);
+    if (item?.full_value) return item.full_value;
+    if (item?.path) return item.path;
+    return item?.name || item?.value || item?.label || item?.id || '';
+  }).filter(Boolean).join(' / ') || '—';
+}
+
+function renderJumpServerAssets() {
+  const assets = state.jumpserverAssets;
+  if (!assets.length) {
+    el.jumpserverEmpty().classList.remove('hidden');
+    return;
+  }
+  el.jumpserverTableWrap().classList.remove('hidden');
+  const tbody = el.jumpserverBody();
+  tbody.innerHTML = '';
+  assets.forEach((asset) => {
+    const protocols = (asset.protocols || []).map((p) => `${p.name}:${p.port}`).join(', ') || '—';
+    const platform = typeof asset.platform === 'string' ? asset.platform : (asset.platform?.name || asset.platform?.label || '—');
+    const group = groupText(asset.nodes?.length ? asset.nodes : asset.node);
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${escHtml(asset.name || asset.id)}</td><td>${escHtml(group)}</td><td class="mono">${escHtml(asset.address || '—')}</td><td>${escHtml(platform)}</td><td class="mono">${escHtml(protocols)}</td><td>${asset.accounts_amount ?? '—'}</td><td class="col-actions"><button class="btn btn-sm btn-jms-accounts" data-id="${escHtml(asset.id)}" data-name="${escHtml(asset.name || asset.id)}">查看账号</button></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function loadJumpServerAccounts(assetId, assetName) {
+  el.jumpserverAccountsPanel().classList.remove('hidden');
+  el.jumpserverAccountsTitle().textContent = `${assetName} · 账号`;
+  el.jumpserverAccountsLoading().classList.remove('hidden');
+  el.jumpserverAccountsEmpty().classList.add('hidden');
+  el.jumpserverAccountsTableWrap().classList.add('hidden');
+  try {
+    const data = await api.getJumpServerAccounts(assetId);
+    const accounts = Array.isArray(data) ? data : (data.accounts || []);
+    const tbody = el.jumpserverAccountsBody();
+    tbody.innerHTML = '';
+    if (!accounts.length) {
+      el.jumpserverAccountsEmpty().classList.remove('hidden');
+      return;
+    }
+    accounts.forEach((account) => {
+      const tr = document.createElement('tr');
+      const template = groupText(account.account_template || account.account_group || account.account);
+      const groups = groupText(account.groups || account.labels);
+      const secretType = groupText(account.secret_type);
+      tr.innerHTML = `<td>${escHtml(account.name || account.id || '—')}</td><td class="mono">${escHtml(account.username || '—')}</td><td>${account.privileged ? '是' : '否'}</td><td>${escHtml(secretType)}</td><td>${escHtml(template)}</td><td>${escHtml(groups)}</td>`;
+      tbody.appendChild(tr);
+    });
+    el.jumpserverAccountsTableWrap().classList.remove('hidden');
+  } catch (e) {
+    showStatus(el.jumpserverStatus(), '读取账号失败: ' + describeError(e), 'error');
+  } finally {
+    el.jumpserverAccountsLoading().classList.add('hidden');
+  }
+}
+
+function handleJumpServerTableClick(e) {
+  const btn = e.target.closest('.btn-jms-accounts');
+  if (btn) loadJumpServerAccounts(btn.dataset.id, btn.dataset.name);
+}
+
 // ── Sessions view ───────────────────────────────────────────────
 async function loadSessions() {
   el.sessionsLoading().classList.remove('hidden');
@@ -1017,6 +1118,11 @@ function attachEventListeners() {
 
   // Hosts table actions (delegated)
   el.hostsBody().addEventListener('click', handleHostsTableClick);
+
+  // JumpServer inventory
+  el.jumpserverRefresh().addEventListener('click', loadJumpServerAssets);
+  el.jumpserverBody().addEventListener('click', handleJumpServerTableClick);
+  el.jumpserverAccountsClose().addEventListener('click', () => el.jumpserverAccountsPanel().classList.add('hidden'));
 
   // Sessions
   el.sessionsRefresh().addEventListener('click', loadSessions);

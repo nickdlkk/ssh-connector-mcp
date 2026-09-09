@@ -4,6 +4,7 @@
 
 use crate::audit::AuditLog;
 use crate::config::Config;
+use crate::jumpserver::{Asset, JumpServerClient};
 use crate::error::{ConnectorError, Result};
 use crate::session::{ExecLimits, SessionManager};
 use crate::ssh::ConnectionPool;
@@ -34,6 +35,7 @@ pub struct AppState {
     pub config: Config,
     /// Loopback bearer token shared with the local MCP stdio shim.
     pub local_token: String,
+    pub jumpserver: Option<Arc<JumpServerClient>>,
 }
 
 impl AppState {
@@ -42,7 +44,7 @@ impl AppState {
         audit: Arc<AuditLog>,
         config: Config,
         local_token: String,
-    ) -> Arc<Self> {
+    ) -> Result<Arc<Self>> {
         let pool = Arc::new(ConnectionPool::new(vault.clone(), config.keepalive_secs));
         let limits = ExecLimits {
             timeout: Duration::from_millis(config.exec_timeout_ms),
@@ -53,14 +55,20 @@ impl AppState {
             limits,
             Duration::from_secs(config.pty_idle_ttl_secs),
         );
-        Arc::new(Self {
+        Ok(Arc::new(Self {
             vault,
             pool,
             sessions,
             audit,
+            jumpserver: config
+                .jumpserver
+                .clone()
+                .map(JumpServerClient::new)
+                .transpose()?
+                .map(Arc::new),
             config,
             local_token,
-        })
+        }))
     }
 
     // --- Host management (AI may create/update; reads are redacted) ---
@@ -144,6 +152,33 @@ impl AppState {
             .record(AuditLog::entry("host_disconnect").with_host(id));
         Ok(())
     }
+
+    pub async fn jumpserver_assets(&self) -> Result<Vec<Asset>> {
+        let client = self.jumpserver.as_ref().ok_or_else(|| ConnectorError::bad_request("JumpServer is not configured"))?;
+        client.list_assets().await
+    }
+
+    pub async fn jumpserver_accounts(&self, asset_id: &str) -> Result<Vec<crate::jumpserver::Account>> {
+        let client = self.jumpserver.as_ref().ok_or_else(|| ConnectorError::bad_request("JumpServer is not configured"))?;
+        client.list_accounts(asset_id).await
+    }
+
+    pub async fn jumpserver_asset_session(
+        &self,
+        asset_id: &str,
+        account_id: &str,
+        rows: u16,
+        cols: u16,
+    ) -> Result<SessionInfo> {
+        let client = self.jumpserver.as_ref().ok_or_else(|| ConnectorError::bad_request("JumpServer is not configured"))?;
+        let password_host_id = client.ssh_password_host_id();
+        let password_cfg = self.vault.get_host_config(password_host_id)?;
+        let cfg = client.resolve_target(asset_id, account_id, password_cfg.auth).await?;
+        let target = cfg;
+        let host_id = target.id.clone();
+        self.sessions.open_pty_on_config(&host_id, &target, rows, cols).await
+    }
+
 
     // --- Exec / PTY / SFTP (delegated to the session manager) ---
 

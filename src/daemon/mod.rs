@@ -26,7 +26,6 @@ pub struct DaemonOptions {
 pub async fn run(opts: DaemonOptions) -> anyhow::Result<()> {
     let data_dir = config::resolve_data_dir(opts.data_dir.clone())?;
     let cfg = Config::load_or_init(&data_dir)?;
-
     let vault = Arc::new(Vault::open(&data_dir.join("vault.db"))?);
     let audit = Arc::new(AuditLog::new(data_dir.join("audit")));
 
@@ -35,7 +34,7 @@ pub async fn run(opts: DaemonOptions) -> anyhow::Result<()> {
     maybe_unlock(&vault, &opts)?;
 
     let local_token = generate_token();
-    let state = AppState::new(vault, audit, cfg.clone(), local_token);
+    let state = AppState::new(vault, audit, cfg.clone(), local_token)?;
 
     if opts.stdio_mcp {
         // stdio MCP requires an already-unlocked vault (no interactive prompt).

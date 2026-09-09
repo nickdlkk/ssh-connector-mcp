@@ -5,7 +5,30 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JumpServerConfig {
+    pub api_url: String,
+    pub org_id: String,
+    pub api_access_key_env: String,
+    pub api_secret_key_env: String,
+    pub ssh_username: String,
+    /// Existing persisted host id whose JumpServer password is reused; no duplicate host is created.
+    pub ssh_password_host_id: String,
+    pub koko_host: String,
+    #[serde(default = "default_koko_port")]
+    pub koko_port: u16,
+    #[serde(default)]
+    pub verify_tls: bool,
+}
+
+fn default_koko_port() -> u16 { 32222 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Optional static JumpServer API provider. Credentials are referenced by env var names.
+    #[serde(default)]
+    pub jumpserver: Option<JumpServerConfig>,
+    #[serde(default)]
+    pub jumpserver_config_path: Option<PathBuf>,
     /// Web UI bind address. Forced to loopback by the daemon regardless.
     #[serde(default = "default_web_port")]
     pub web_port: u16,
@@ -54,6 +77,8 @@ fn default_max_channels() -> usize {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            jumpserver: None,
+            jumpserver_config_path: None,
             web_port: default_web_port(),
             mcp_port: default_mcp_port(),
             exec_timeout_ms: default_exec_timeout_ms(),

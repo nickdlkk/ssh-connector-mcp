@@ -366,16 +366,34 @@ impl ConnectionPool {
         }
     }
 
-    /// Connect (or reconnect) a host. Replaces any existing dead handle.
+    /// Connect (or reconnect) a persisted host. Replaces any existing dead handle.
     pub async fn connect(&self, host_id: &str) -> Result<()> {
         let cfg = self.vault.get_host_config(host_id)?;
-        let handle = establish(&self.vault, &cfg, self.keepalive_secs).await?;
+        self.connect_config(host_id, &cfg).await
+    }
+
+    /// Connect a runtime-only target without persisting it in the vault.
+    pub async fn connect_config(&self, host_id: &str, cfg: &HostConfig) -> Result<()> {
+        let handle = establish(&self.vault, cfg, self.keepalive_secs).await?;
         let conn = Arc::new(Connection {
             handle,
             host_id: host_id.to_string(),
         });
         self.conns.lock().await.insert(host_id.to_string(), conn);
         Ok(())
+    }
+
+    /// Get or connect a runtime-only target.
+    pub async fn get_or_connect_config(
+        &self,
+        host_id: &str,
+        cfg: &HostConfig,
+    ) -> Result<Arc<Connection>> {
+        if let Ok(c) = self.get(host_id).await {
+            return Ok(c);
+        }
+        self.connect_config(host_id, cfg).await?;
+        self.get(host_id).await
     }
 
     /// Get a live connection, erroring if not connected/dropped. Does NOT

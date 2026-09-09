@@ -44,6 +44,7 @@
       </div>
       <ul class="nav-list" role="list">
         <li><button class="nav-item active" data-view="hosts" aria-current="page">&#9638; 主机</button></li>
+        <li><button class="nav-item" data-view="jumpserver">&#9673; JumpServer</button></li>
         <li><button class="nav-item" data-view="sessions">&#9654; 会话</button></li>
         <li><button class="nav-item" data-view="audit">&#8801; 审计日志</button></li>
       </ul>
@@ -86,6 +87,38 @@
             </tr></thead>
             <tbody id="hosts-body"></tbody>
           </table>
+        </div>
+      </section>
+      <!-- JUMPSERVER VIEW -->
+      <section id="view-jumpserver" class="view hidden" aria-label="JumpServer 纳管主机">
+        <header class="view-header">
+          <div class="view-title-group">
+            <span class="view-kicker">JumpServer</span>
+            <h2>纳管主机</h2>
+            <p>从 JumpServer API 查看当前组织可见的资产、平台、协议和账号元数据。</p>
+          </div>
+          <button id="jumpserver-refresh" class="btn btn-ghost btn-sm">&#8635; 刷新</button>
+        </header>
+        <div class="summary-strip">
+          <div><strong>资产</strong><span>JumpServer 纳管主机</span></div>
+          <div><strong>账号</strong><span>按资产展开查看</span></div>
+          <div><strong>协议</strong><span>显示协议和端口</span></div>
+          <div><strong>安全</strong><span>不读取或显示凭据</span></div>
+        </div>
+        <div id="jumpserver-status" class="status-bar hidden" role="status" aria-live="polite"></div>
+        <div id="jumpserver-loading" class="loading-state hidden">加载中&hellip;</div>
+        <div id="jumpserver-empty" class="empty-state hidden">JumpServer 没有返回纳管资产。</div>
+        <div id="jumpserver-table-wrap" class="hidden">
+          <table class="data-table" aria-label="JumpServer 纳管主机">
+            <thead><tr><th>资产名称</th><th>分组 / 节点</th><th>地址</th><th>平台</th><th>协议</th><th>账号数</th><th class="col-actions">操作</th></tr></thead>
+            <tbody id="jumpserver-body"></tbody>
+          </table>
+        </div>
+        <div id="jumpserver-accounts-panel" class="jumpserver-accounts-panel hidden">
+          <div class="subpanel-header"><div><span class="view-kicker">Accounts</span><h3 id="jumpserver-accounts-title">账号</h3></div><button id="jumpserver-accounts-close" class="btn btn-ghost btn-sm">关闭</button></div>
+          <div id="jumpserver-accounts-loading" class="loading-state hidden">加载中&hellip;</div>
+          <div id="jumpserver-accounts-empty" class="empty-state hidden">该资产没有可见账号。</div>
+          <div id="jumpserver-accounts-table-wrap" class="hidden"><table class="data-table"><thead><tr><th>名称</th><th>用户名</th><th>特权账号</th><th>凭据类型</th><th>账号组 / 模板</th><th>标签</th></tr></thead><tbody id="jumpserver-accounts-body"></tbody></table></div>
         </div>
       </section>
       <!-- SESSIONS VIEW -->
