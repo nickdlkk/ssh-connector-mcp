@@ -50,6 +50,22 @@ cargo install --git https://github.com/LCYLYM/ssh-connector-mcp ssh-connector --
 ssh-connector --data-dir ~/.ssh-connector
 ```
 
+### 下载预编译二进制文件
+
+每个版本标签都会在
+[GitHub Releases](https://github.com/nickdlkk/ssh-connector-mcp/releases)
+发布 Linux x86_64、Windows x86_64、Intel macOS 和 Apple Silicon macOS
+压缩包。Windows 用户下载
+`ssh-connector-vX.Y.Z-x86_64-pc-windows-msvc.zip`，解压出
+`ssh-connector.exe` 后执行：
+
+```powershell
+.\ssh-connector.exe --data-dir "$env:USERPROFILE\.ssh-connector"
+```
+
+可使用同一 Release 中的 `SHA256SUMS` 校验下载文件。发布工作流位于
+`.github/workflows/release.yml`，推送 `v*.*.*` 标签后会自动构建并发布。
+
 打开 Web UI，初始化 vault 并添加主机：
 
 ```text

@@ -50,6 +50,22 @@ cargo install --git https://github.com/LCYLYM/ssh-connector-mcp ssh-connector --
 ssh-connector --data-dir ~/.ssh-connector
 ```
 
+### Prebuilt binaries
+
+Every tagged release publishes archives for Linux x86_64, Windows x86_64,
+Intel macOS, and Apple Silicon macOS on the
+[GitHub Releases page](https://github.com/nickdlkk/ssh-connector-mcp/releases).
+Windows users can download `ssh-connector-vX.Y.Z-x86_64-pc-windows-msvc.zip`,
+extract `ssh-connector.exe`, and run:
+
+```powershell
+.\ssh-connector.exe --data-dir "$env:USERPROFILE\.ssh-connector"
+```
+
+Use the accompanying `SHA256SUMS` file to verify the downloaded archive.
+The release workflow is defined in `.github/workflows/release.yml` and runs
+when a `v*.*.*` tag is pushed.
+
 Open the Web UI, initialize the vault, and add hosts:
 
 ```text
