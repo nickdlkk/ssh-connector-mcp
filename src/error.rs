@@ -39,6 +39,8 @@ pub enum ErrorCode {
     Disconnected,
     /// Requested session id does not exist or already closed.
     SessionNotFound,
+    /// PTY session is currently executing a bounded command.
+    SessionBusy,
     /// Operation exceeded its deadline.
     Timeout,
     /// A field that is write-only for AI was requested for read.
@@ -70,6 +72,7 @@ impl ErrorCode {
             ErrorCode::HostKeyMismatch => "host_key_mismatch",
             ErrorCode::Disconnected => "disconnected",
             ErrorCode::SessionNotFound => "session_not_found",
+            ErrorCode::SessionBusy => "session_busy",
             ErrorCode::Timeout => "timeout",
             ErrorCode::CredentialWriteOnly => "credential_write_only",
             ErrorCode::BadRequest => "bad_request",

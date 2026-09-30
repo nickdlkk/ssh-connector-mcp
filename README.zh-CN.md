@@ -522,3 +522,8 @@ keyboard-interactive、跳板成功和失败、最终目标错误分类、TOFU m
 ## License
 
 MIT
+
+
+### 在已有 PTY 会话中执行命令
+
+`session_exec` 在已有 `session_open` shell 中执行一条单行命令，保留 `cd`、导出变量等 shell 状态。返回合并后的 PTY `output`（stdout/stderr 无法区分）、`exit_code`、`duration_ms`、`timed_out` 与 `truncated`；不同于 `exec`，它使用已有 PTY，不新建或关闭 SSH 会话。`wait_ms` 最大 300000；`max_output_bytes` 默认取配置，最大 1048576。首次 `wait_ms`（默认 5000）只限制本次等待，不会取消远端命令。等待时间到期时返回 `timed_out=true` 和不透明 `token`；之后对同一 session 调用 `session_exec_read`，可获取增量输出及最终退出码。命令完成后 token 清空。审计仅记录元数据，不记录命令或输出。命令可能改变远端状态。

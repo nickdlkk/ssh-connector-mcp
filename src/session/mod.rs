@@ -17,7 +17,7 @@ use crate::error::{ConnectorError, ErrorCode, Result};
 use crate::ssh::{Connection, ConnectionPool};
 use crate::types::{
     BecomeRootConfig, DirEntry, ExecPayload, ExecResult, ReadResult, ScreenSnapshot, SessionInfo,
-    SessionKind,
+    SessionKind, SessionExecResult,
 };
 use futures_util::{StreamExt, stream};
 use russh::ChannelMsg;
@@ -852,6 +852,14 @@ impl SessionManager {
             .get(session_id)
             .cloned()
             .ok_or_else(|| ConnectorError::session_not_found(session_id))
+    }
+
+    pub async fn pty_exec(&self, session_id: &str, command: &str, wait: Duration, max_output_bytes: usize) -> Result<SessionExecResult> {
+        self.get_pty(session_id).await?.execute(command, wait, max_output_bytes).await
+    }
+
+    pub async fn pty_exec_read(&self, session_id: &str, token: &str, wait: Duration) -> Result<SessionExecResult> {
+        self.get_pty(session_id).await?.read_execution(token, wait).await
     }
 
     pub async fn pty_send_text(&self, session_id: &str, text: &str) -> Result<()> {

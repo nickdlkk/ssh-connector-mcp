@@ -514,3 +514,10 @@ code instead of being mislabeled as jump failures.
 ## License
 
 MIT
+
+
+### Execute in an existing PTY session
+
+`session_exec` runs one single-line command in an existing `session_open` shell, preserving shell state such as `cd` and exported variables. It returns merged PTY `output` (stdout/stderr cannot be distinguished), `exit_code`, `duration_ms`, `timed_out`, and `truncated`; unlike `exec`, it uses the existing PTY and does not open or close an SSH session. Initial `wait_ms` defaults to 5000 (maximum 300000) and only limits how long this call waits; it does not cancel the remote command. If still running, the result returns `timed_out=true` and an opaque `token`; call `session_exec_read` with the same session and token to fetch incremental output and the eventual exit code. Output is capped by `max_output_bytes` (maximum 1048576). Concurrent commands and terminal input are rejected while it runs. Audit records metadata only, not command or output. Commands can change remote state.
+
+Follow-up polling tool: `session_exec_read(session_id, token, wait_ms?)`. It returns incremental output and, once complete, the exit code and a cleared token.

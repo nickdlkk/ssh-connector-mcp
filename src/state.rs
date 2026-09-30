@@ -10,7 +10,7 @@ use crate::session::{ExecLimits, SessionManager};
 use crate::ssh::ConnectionPool;
 use crate::types::{
     DirEntry, ExecPayload, ExecResult, HostDetail, HostSpec, HostStatus, HostSummary, KeyName,
-    ReadResult, ScreenSnapshot, SessionInfo,
+    ReadResult, ScreenSnapshot, SessionInfo, SessionExecResult,
 };
 use crate::vault::Vault;
 use serde_json::json;
@@ -271,6 +271,35 @@ impl AppState {
                 Err(e)
             }
         }
+    }
+
+    pub async fn pty_exec(&self, session_id: &str, raw: &str, wait_ms: Option<u64>, max_output_bytes: Option<usize>) -> Result<SessionExecResult> {
+        let wait_ms = wait_ms.unwrap_or(5_000).min(300_000);
+        let cap = max_output_bytes.unwrap_or(self.config.exec_output_cap_bytes).min(1_048_576);
+        let result = self.sessions.pty_exec(session_id, raw, Duration::from_millis(wait_ms), cap).await;
+        match result {
+            Ok(r) => {
+                self.audit.record(AuditLog::entry("pty_exec").with_session(session_id).with_exit(r.exit_code).with_detail(json!({
+                    "duration_ms": r.duration_ms, "output_bytes": r.output.len(), "timed_out": r.timed_out,
+                    "truncated": r.truncated, "had_invalid_utf8": r.had_invalid_utf8,
+                })));
+                Ok(r)
+            }
+            Err(e) => {
+                self.audit.record(AuditLog::entry("pty_exec_failed").with_session(session_id).with_detail(json!({"error_code": e.code})));
+                Err(e)
+            }
+        }
+    }
+
+    pub async fn pty_exec_read(&self, session_id: &str, token: &str, wait_ms: Option<u64>) -> Result<SessionExecResult> {
+        let wait_ms = wait_ms.unwrap_or(0).min(300_000);
+        let result = self.sessions.pty_exec_read(session_id, token, Duration::from_millis(wait_ms)).await?;
+        self.audit.record(AuditLog::entry("pty_exec_read").with_session(session_id).with_exit(result.exit_code).with_detail(json!({
+            "token": token, "duration_ms": result.duration_ms, "output_bytes": result.output.len(),
+            "timed_out": result.timed_out, "truncated": result.truncated,
+        })));
+        Ok(result)
     }
 
     pub async fn pty_send_text(&self, session_id: &str, text: &str) -> Result<()> {

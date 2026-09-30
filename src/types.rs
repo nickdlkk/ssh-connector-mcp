@@ -278,6 +278,21 @@ pub enum ExecPayload {
     Raw { raw: String },
 }
 
+/// Result of a command executed inside an existing persistent PTY shell.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct SessionExecResult {
+    pub session_id: String,
+    /// Opaque execution token. Present while the remote command is still running.
+    pub token: Option<String>,
+    /// Merged PTY output; stdout and stderr cannot be distinguished.
+    pub output: String,
+    pub exit_code: Option<i32>,
+    pub duration_ms: u64,
+    pub timed_out: bool,
+    pub truncated: bool,
+    pub had_invalid_utf8: bool,
+}
+
 /// Result of a one-shot exec.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ExecResult {

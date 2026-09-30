@@ -120,6 +120,28 @@ fn default_cols() -> u16 {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct SessionExecRequest {
+    pub session_id: String,
+    /// One single-line raw shell command, executed in the existing shell.
+    pub raw: String,
+    /// Maximum initial wait in milliseconds. Defaults to 5000; maximum 300000.
+    #[serde(default)]
+    pub wait_ms: Option<u64>,
+    /// Maximum merged PTY output bytes. Defaults to configured output cap; maximum 1048576.
+    pub max_output_bytes: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SessionExecReadRequest {
+    pub session_id: String,
+    /// Opaque token returned while session_exec is still running.
+    pub token: String,
+    /// Optional long-poll duration in milliseconds. Defaults to 0; max 300000.
+    #[serde(default)]
+    pub wait_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SessionIdRequest {
     pub session_id: String,
 }
@@ -602,6 +624,37 @@ impl McpServer {
     }
 
     #[tool(
+        description = "Execute one single-line raw shell command in an existing PTY shell, preserving shell state and keeping the session open. Unlike exec, it uses the existing PTY; stdout/stderr are merged. The command may change remote state. Initial wait_ms defaults to 5000 and only limits this call; expiration does not cancel the remote command. If still running, timed_out=true and an opaque token is returned for session_exec_read. Concurrent commands and terminal input are rejected as session_busy while it runs. Audit stores metadata only, not command or output."
+    )]
+    async fn session_exec(
+        &self,
+        Parameters(req): Parameters<SessionExecRequest>,
+    ) -> Result<Json<crate::types::SessionExecResult>, ErrorData> {
+        if req.wait_ms.is_some_and(|n| n > 300_000) {
+            return Err(ErrorData::invalid_params("wait_ms must be at most 300000", None));
+        }
+        if req.max_output_bytes == Some(0) || req.max_output_bytes.is_some_and(|n| n > 1_048_576) {
+            return Err(ErrorData::invalid_params("max_output_bytes must be between 1 and 1048576", None));
+        }
+        let result = self.state.pty_exec(&req.session_id, &req.raw, req.wait_ms, req.max_output_bytes).await.map_err(err_to_mcp)?;
+        Ok(Json(result))
+    }
+
+    #[tool(
+        description = "Poll a running session_exec command using its opaque token. Returns only output produced since the previous poll. If still running, timed_out=true and the same token is returned; when finished, exit_code is returned and token becomes null. This does not cancel or interrupt the command."
+    )]
+    async fn session_exec_read(
+        &self,
+        Parameters(req): Parameters<SessionExecReadRequest>,
+    ) -> Result<Json<crate::types::SessionExecResult>, ErrorData> {
+        if req.wait_ms.is_some_and(|n| n > 300_000) {
+            return Err(ErrorData::invalid_params("wait_ms must be at most 300000", None));
+        }
+        let result = self.state.pty_exec_read(&req.session_id, &req.token, req.wait_ms).await.map_err(err_to_mcp)?;
+        Ok(Json(result))
+    }
+
+    #[tool(
         description = "Send literal text to a PTY session's stdin (no implicit newline — include \\n or use a key to submit)."
     )]
     async fn session_send_text(
@@ -885,6 +938,8 @@ mod tests {
             .collect();
         assert!(names.iter().any(|name| name == "sftp_download_file"));
         assert!(names.iter().any(|name| name == "sftp_upload_file"));
+        assert!(names.iter().any(|name| name == "session_exec"));
+        assert!(names.iter().any(|name| name == "session_exec_read"));
         assert!(!names.iter().any(|name| name.contains("reveal")));
         assert!(!names.iter().any(|name| name.contains("credential_get")));
     }
