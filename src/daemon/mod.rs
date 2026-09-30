@@ -25,9 +25,13 @@ pub struct DaemonOptions {
 
 pub async fn run(opts: DaemonOptions) -> anyhow::Result<()> {
     let data_dir = config::resolve_data_dir(opts.data_dir.clone())?;
-    let cfg = Config::load_or_init(&data_dir)?;
+    let mut cfg = Config::load_or_init(&data_dir)?;
+    if opts.stdio_mcp {
+        cfg.web_port = 0;
+        cfg.mcp_port = 0;
+    }
     let vault = Arc::new(Vault::open(&data_dir.join("vault.db"))?);
-    let audit = Arc::new(AuditLog::new(data_dir.join("audit")));
+    let audit = Arc::new(AuditLog::try_new(data_dir.join("audit"))?);
 
     // Optional headless unlock. If the vault is uninitialized, unlock is skipped
     // and the Web UI drives first-run init.

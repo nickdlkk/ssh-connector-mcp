@@ -38,7 +38,7 @@ SSH Connector MCP 把职责拆开：
 - **目标文件安全提交**：支持父目录创建、默认禁止覆盖、同目录临时文件、覆盖回滚、失败清理、大小检查和本地/远端本机 SHA-256 验证。
 - **连接生命周期**：SSH transport 会复用；一次性操作按需连接；删除主机会断开对应 live connection。
 - **跳板和多认证方式**：支持密码、带可选 passphrase 的私钥、keyboard-interactive，以及每跳独立认证的跳板链。
-- **审计日志**：vault、主机、exec、PTY 和 SFTP 操作都写入本地审计记录。
+- **审计日志**：本地 SQLite（`audit.sqlite3`），UTC 滚动保留 7 天、导入旧 JSONL，支持筛选/排序/游标分页和有界脱敏；不存储 WebSocket 帧正文。详见 [`docs/audit-sqlite.md`](docs/audit-sqlite.md)。
 - **适合 MacBook 常驻**：空闲 daemon 很轻量，不创建阻止系统睡眠的电源断言。
 
 ## 一条命令安装
@@ -64,8 +64,12 @@ ssh-connector --data-dir ~/.ssh-connector
 ```
 
 可使用同一 Release 中的 `SHA256SUMS` 校验下载文件。发布工作流位于
-`.github/workflows/release.yml`，推送 `v*.*.*` 标签后会自动构建并发布。v0.1.1
-新增已有 PTY 会话的长命令 token 轮询工具（`session_exec` 与
+`.github/workflows/release.yml`，推送 `v*.*.*` 标签后会自动构建并发布。v0.1.2
+新增本地 SQLite 审计库、UTC滚动保留7天、旧JSONL导入（保留原文件）、
+审计筛选/排序/游标分页及有界秘密过滤。MCP/Web API 在 handler 边界记审计；
+不保存 WebSocket 帧正文。详见 [docs/audit-sqlite.md](docs/audit-sqlite.md)。
+
+v0.1.1 新增已有 PTY 会话的长命令 token 轮询工具（`session_exec` 与
 `session_exec_read`）；首次等待结束不会取消远端命令。
 
 打开 Web UI，初始化 vault 并添加主机：
@@ -79,6 +83,10 @@ MCP endpoint：
 ```text
 http://127.0.0.1:7600/mcp
 ```
+
+## 审计存储与 API
+
+SQLite 审计库、UTC 滚动保留、JSONL 导入、安全输入/输出策略、查询筛选/排序/游标分页见 [docs/audit-sqlite.md](docs/audit-sqlite.md)。
 
 ## 接入 AI 客户端
 

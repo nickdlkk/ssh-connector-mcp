@@ -1,7 +1,9 @@
 mod error;
 mod types;
 
+mod audit_policy;
 mod audit;
+mod mcp_audit_policy;
 mod config;
 mod daemon;
 mod jumpserver;

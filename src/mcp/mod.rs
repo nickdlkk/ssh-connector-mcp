@@ -17,7 +17,9 @@ use crate::jumpserver::{Account, Asset};
 use base64::Engine;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
-use rmcp::model::{JsonObject, ServerCapabilities, ServerInfo};
+use rmcp::handler::server::tool::ToolCallContext;
+use rmcp::model::{CallToolResult, JsonObject, ServerCapabilities, ServerInfo};
+use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -880,6 +882,41 @@ impl McpServer {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for McpServer {
+    fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<CallToolResult, ErrorData>> + Send + '_ {
+        async move {
+            let method = request.name.to_string();
+            let input = crate::mcp_audit_policy::sanitize_input(Value::Object(request.arguments.clone().unwrap_or_default()));
+            let started = std::time::Instant::now();
+            let input_copy = input.clone();
+            let result = self.tool_router.call(ToolCallContext::new(self, request, context)).await;
+            let elapsed = started.elapsed().as_millis() as i64;
+            match result {
+                Ok(output) => {
+                    let output_value = Some(crate::mcp_audit_policy::sanitize_output(&serde_json::to_value(&output).unwrap_or(Value::Null), &method));
+            let audit_result = self.state.audit.try_record_fields(crate::audit::AuditLog::entry(&method), "mcp", input, output_value, Some(elapsed), None, None, None);
+                    if let Err(error) = audit_result {
+                        tracing::error!(target:"audit",method=%method,"mandatory MCP audit failed: {error}");
+                        return Err(ErrorData::internal_error("audit unavailable".to_string(),None));
+                    }
+                    Ok(output)
+                }
+                Err(error) => {
+                    let code = format!("{:?}", error.code);
+                    let audit_result = self.state.audit.try_record_fields(crate::audit::AuditLog::entry(&method), "mcp", input_copy, Some(serde_json::json!({"error_code":code})), Some(elapsed), None, None, Some(&code));
+                    if let Err(audit_error) = audit_result {
+                        tracing::error!(target:"audit",method=%method,"mandatory MCP audit failed for error response: {audit_error}");
+                        return Err(ErrorData::internal_error("audit unavailable".to_string(),None));
+                    }
+                    Err(error)
+                }
+            }
+        }
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "SSH maintenance connector. When the user asks to operate SSH hosts, remote Linux \

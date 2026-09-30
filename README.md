@@ -38,7 +38,7 @@ SSH Connector MCP separates these responsibilities:
 - **Destination-safe file commits**: optional parent creation, no-clobber by default, same-directory temporary files, overwrite rollback, failure cleanup, size checks, and local/server-side SHA-256 verification.
 - **Connection lifecycle**: SSH transports are pooled and reused; one-shot operations connect on demand; removing a host drops its live connection.
 - **Jump hosts and multiple auth modes**: password, private key with optional passphrase, keyboard-interactive, and per-hop jump chains.
-- **Audit log**: vault, host, exec, PTY, and SFTP operations are recorded locally.
+- **Audit log**: local SQLite (`audit.sqlite3`) with a rolling seven-day UTC retention window, legacy JSONL import, query filters/sorting/cursors, and bounded redaction policy; WebSocket frame bodies are excluded. See [`docs/audit-sqlite.md`](docs/audit-sqlite.md).
 - **MacBook-friendly idle profile**: idle daemon is lightweight; no sleep-preventing power assertion.
 
 ## Install In One Command
@@ -46,7 +46,7 @@ SSH Connector MCP separates these responsibilities:
 The recommended production shape is a local daemon plus a Streamable HTTP MCP endpoint:
 
 ```bash
-cargo install --git https://github.com/nickdlkk/ssh-connector-mcp --tag v0.1.1 ssh-connector --locked
+cargo install --git https://github.com/nickdlkk/ssh-connector-mcp --tag v0.1.2 ssh-connector --locked
 ssh-connector --data-dir ~/.ssh-connector
 ```
 
@@ -64,9 +64,15 @@ extract `ssh-connector.exe`, and run:
 
 Use the accompanying `SHA256SUMS` file to verify the downloaded archive.
 The release workflow is defined in `.github/workflows/release.yml` and runs
-when a `v*.*.*` tag is pushed. Release v0.1.1 adds token-based polling for
-long-running commands in an existing PTY session (`session_exec` and
-`session_exec_read`); the initial wait does not cancel the remote command.
+when a `v*.*.*` tag is pushed. Release v0.1.2 adds a local SQLite audit store with
+rolling seven-day UTC retention, legacy JSONL import (source files retained),
+query filters/sorting/cursor pagination, and bounded secret redaction. MCP and
+Web API calls are audited at their handler boundary; raw WebSocket frames are
+not stored. See [docs/audit-sqlite.md](docs/audit-sqlite.md).
+
+Release v0.1.1 added token-based polling for long-running commands in an
+existing PTY session (`session_exec` and `session_exec_read`); the initial wait
+does not cancel the remote command.
 
 Open the Web UI, initialize the vault, and add hosts:
 
@@ -79,6 +85,10 @@ MCP endpoint:
 ```text
 http://127.0.0.1:7600/mcp
 ```
+
+## Audit storage and API
+
+SQLite audit storage, rolling UTC retention, JSONL import, safe input/output policy, query filters, sorting, and cursor pagination are described in [docs/audit-sqlite.md](docs/audit-sqlite.md).
 
 ## Add To AI Clients
 

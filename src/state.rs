@@ -13,7 +13,6 @@ use crate::types::{
     ReadResult, ScreenSnapshot, SessionInfo, SessionExecResult,
 };
 use crate::vault::Vault;
-use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -74,32 +73,16 @@ impl AppState {
     // --- Host management (AI may create/update; reads are redacted) ---
 
     pub fn add_host(&self, spec: HostSpec) -> Result<String> {
-        let detail = host_spec_audit_detail(&spec);
-        let id = self.vault.add_host(spec)?;
-        self.audit.record(
-            AuditLog::entry("host_add")
-                .with_host(&id)
-                .with_detail(detail),
-        );
-        Ok(id)
+        self.vault.add_host(spec)
     }
 
     pub fn update_host(&self, id: &str, spec: HostSpec) -> Result<()> {
-        let detail = host_spec_audit_detail(&spec);
-        self.vault.update_host(id, spec)?;
-        self.audit.record(
-            AuditLog::entry("host_update")
-                .with_host(id)
-                .with_detail(detail),
-        );
-        Ok(())
+        self.vault.update_host(id, spec)
     }
 
     pub async fn remove_host(&self, id: &str) -> Result<()> {
         self.pool.disconnect(id).await;
         self.vault.remove_host(id)?;
-        self.audit
-            .record(AuditLog::entry("host_remove").with_host(id));
         Ok(())
     }
 
@@ -131,16 +114,9 @@ impl AppState {
     pub async fn connect_host(&self, id: &str) -> Result<()> {
         match self.pool.connect(id).await {
             Ok(()) => {
-                self.audit
-                    .record(AuditLog::entry("host_connect").with_host(id));
                 Ok(())
             }
             Err(e) => {
-                self.audit.record(
-                    AuditLog::entry("host_connect_failed")
-                        .with_host(id)
-                        .with_detail(error_audit_detail(&e)),
-                );
                 Err(e)
             }
         }
@@ -148,8 +124,6 @@ impl AppState {
 
     pub async fn disconnect_host(&self, id: &str) -> Result<()> {
         self.pool.disconnect(id).await;
-        self.audit
-            .record(AuditLog::entry("host_disconnect").with_host(id));
         Ok(())
     }
 
@@ -185,31 +159,9 @@ impl AppState {
     pub async fn exec(&self, host_id: &str, payload: &ExecPayload) -> Result<ExecResult> {
         match self.sessions.exec(host_id, payload).await {
             Ok(r) => {
-                self.audit.record(
-                    AuditLog::entry("exec")
-                        .with_host(host_id)
-                        .with_exit(r.exit_code)
-                        .with_detail(json!({
-                            "payload": exec_payload_audit_detail(payload),
-                            "stdout_bytes": r.stdout.len(),
-                            "stderr_bytes": r.stderr.len(),
-                            "duration_ms": r.duration_ms,
-                            "truncated": r.truncated,
-                            "timed_out": r.timed_out,
-                            "had_invalid_utf8": r.had_invalid_utf8,
-                        })),
-                );
                 Ok(r)
             }
             Err(e) => {
-                self.audit.record(
-                    AuditLog::entry("exec_failed")
-                        .with_host(host_id)
-                        .with_detail(json!({
-                            "payload": exec_payload_audit_detail(payload),
-                            "error": error_audit_detail(&e),
-                        })),
-                );
                 Err(e)
             }
         }
@@ -218,24 +170,9 @@ impl AppState {
     pub async fn open_pty(&self, host_id: &str, rows: u16, cols: u16) -> Result<SessionInfo> {
         match self.sessions.open_pty(host_id, rows, cols).await {
             Ok(info) => {
-                self.audit.record(
-                    AuditLog::entry("pty_open")
-                        .with_host(host_id)
-                        .with_session(&info.session_id)
-                        .with_detail(json!({ "rows": rows, "cols": cols })),
-                );
                 Ok(info)
             }
             Err(e) => {
-                self.audit.record(
-                    AuditLog::entry("pty_open_failed")
-                        .with_host(host_id)
-                        .with_detail(json!({
-                            "rows": rows,
-                            "cols": cols,
-                            "error": error_audit_detail(&e),
-                        })),
-                );
                 Err(e)
             }
         }
@@ -249,25 +186,9 @@ impl AppState {
             .await;
         match result {
             Ok(info) => {
-                self.audit.record(
-                    AuditLog::entry("pty_open_root")
-                        .with_host(host_id)
-                        .with_session(&info.session_id)
-                        .with_detail(json!({ "rows": rows, "cols": cols, "method": "su" })),
-                );
                 Ok(info)
             }
             Err(e) => {
-                self.audit.record(
-                    AuditLog::entry("pty_open_root_failed")
-                        .with_host(host_id)
-                        .with_detail(json!({
-                            "rows": rows,
-                            "cols": cols,
-                            "method": "su",
-                            "error": error_audit_detail(&e),
-                        })),
-                );
                 Err(e)
             }
         }
@@ -279,14 +200,9 @@ impl AppState {
         let result = self.sessions.pty_exec(session_id, raw, Duration::from_millis(wait_ms), cap).await;
         match result {
             Ok(r) => {
-                self.audit.record(AuditLog::entry("pty_exec").with_session(session_id).with_exit(r.exit_code).with_detail(json!({
-                    "duration_ms": r.duration_ms, "output_bytes": r.output.len(), "timed_out": r.timed_out,
-                    "truncated": r.truncated, "had_invalid_utf8": r.had_invalid_utf8,
-                })));
                 Ok(r)
             }
             Err(e) => {
-                self.audit.record(AuditLog::entry("pty_exec_failed").with_session(session_id).with_detail(json!({"error_code": e.code})));
                 Err(e)
             }
         }
@@ -295,30 +211,16 @@ impl AppState {
     pub async fn pty_exec_read(&self, session_id: &str, token: &str, wait_ms: Option<u64>) -> Result<SessionExecResult> {
         let wait_ms = wait_ms.unwrap_or(0).min(300_000);
         let result = self.sessions.pty_exec_read(session_id, token, Duration::from_millis(wait_ms)).await?;
-        self.audit.record(AuditLog::entry("pty_exec_read").with_session(session_id).with_exit(result.exit_code).with_detail(json!({
-            "token": token, "duration_ms": result.duration_ms, "output_bytes": result.output.len(),
-            "timed_out": result.timed_out, "truncated": result.truncated,
-        })));
         Ok(result)
     }
 
     pub async fn pty_send_text(&self, session_id: &str, text: &str) -> Result<()> {
         self.sessions.pty_send_text(session_id, text).await?;
-        self.audit.record(
-            AuditLog::entry("pty_send_text")
-                .with_session(session_id)
-                .with_detail(json!({ "bytes": text.len(), "redacted": true })),
-        );
         Ok(())
     }
 
     pub async fn pty_send_key(&self, session_id: &str, key: &KeyName) -> Result<()> {
         self.sessions.pty_send_key(session_id, key).await?;
-        self.audit.record(
-            AuditLog::entry("pty_send_key")
-                .with_session(session_id)
-                .with_detail(json!({ "key": format!("{key:?}") })),
-        );
         Ok(())
     }
 
@@ -336,8 +238,6 @@ impl AppState {
 
     pub async fn close_pty(&self, session_id: &str) -> Result<()> {
         self.sessions.close_pty(session_id).await?;
-        self.audit
-            .record(AuditLog::entry("pty_close").with_session(session_id));
         Ok(())
     }
 
@@ -352,31 +252,16 @@ impl AppState {
 
     pub async fn sftp_list(&self, host_id: &str, path: &str) -> Result<Vec<DirEntry>> {
         let entries = self.sessions.sftp_list(host_id, path).await?;
-        self.audit.record(
-            AuditLog::entry("sftp_list")
-                .with_host(host_id)
-                .with_detail(json!({ "path": path, "entries": entries.len() })),
-        );
         Ok(entries)
     }
 
     pub async fn sftp_get(&self, host_id: &str, path: &str) -> Result<Vec<u8>> {
         let d = self.sessions.sftp_get(host_id, path).await?;
-        self.audit.record(
-            AuditLog::entry("sftp_get")
-                .with_host(host_id)
-                .with_detail(json!({ "path": path, "bytes": d.len() })),
-        );
         Ok(d)
     }
 
     pub async fn sftp_put(&self, host_id: &str, path: &str, data: &[u8]) -> Result<()> {
         self.sessions.sftp_put(host_id, path, data).await?;
-        self.audit.record(
-            AuditLog::entry("sftp_put")
-                .with_host(host_id)
-                .with_detail(json!({ "path": path, "bytes": data.len() })),
-        );
         Ok(())
     }
 
@@ -408,20 +293,6 @@ impl AppState {
                 verify,
             )
             .await?;
-        self.audit.record(
-            AuditLog::entry("sftp_download_file")
-                .with_host(host_id)
-                .with_detail(json!({
-                    "remote_path": remote_path,
-                    "local_path": local_path.display().to_string(),
-                    "bytes": report.bytes,
-                    "sha256": report.sha256,
-                    "verified": report.verified,
-                    "overwrite": overwrite,
-                    "create_parent_dirs": create_parent_dirs,
-                    "chunk_size_bytes": chunk_size,
-                })),
-        );
         Ok(LocalFileTransfer {
             local_path,
             remote_path: remote_path.to_string(),
@@ -454,20 +325,6 @@ impl AppState {
                 verify,
             )
             .await?;
-        self.audit.record(
-            AuditLog::entry("sftp_upload_file")
-                .with_host(host_id)
-                .with_detail(json!({
-                    "local_path": local_path.display().to_string(),
-                    "remote_path": remote_path,
-                    "bytes": report.bytes,
-                    "sha256": report.sha256,
-                    "verified": report.verified,
-                    "overwrite": overwrite,
-                    "create_parent_dirs": create_parent_dirs,
-                    "chunk_size_bytes": chunk_size,
-                })),
-        );
         Ok(LocalFileTransfer {
             local_path,
             remote_path: remote_path.to_string(),
@@ -476,64 +333,6 @@ impl AppState {
             verified: report.verified,
         })
     }
-}
-
-fn host_spec_audit_detail(spec: &HostSpec) -> serde_json::Value {
-    json!({
-        "alias": spec.alias,
-        "host": spec.host,
-        "port": spec.port,
-        "user": spec.user,
-        "auth_kind": spec.auth.kind(),
-        "jump_count": spec.jump_hosts.len(),
-        "env_keys": spec.env.keys().cloned().collect::<Vec<_>>(),
-        "become_root_enabled": spec.become_root.as_ref().map(|c| c.enabled).unwrap_or(false),
-        "become_root_command": spec.become_root.as_ref().map(|c| c.command.clone()),
-    })
-}
-
-fn exec_payload_audit_detail(payload: &ExecPayload) -> serde_json::Value {
-    match payload {
-        ExecPayload::Argv { argv } => json!({
-            "type": "argv",
-            "argc": argv.len(),
-            "preview": argv_preview(argv),
-        }),
-        ExecPayload::Script { script } => json!({
-            "type": "script",
-            "bytes": script.len(),
-            "lines": script.lines().count(),
-            "preview": text_preview(script),
-        }),
-        ExecPayload::Raw { raw } => json!({
-            "type": "raw",
-            "bytes": raw.len(),
-            "preview": text_preview(raw),
-        }),
-    }
-}
-
-fn argv_preview(argv: &[String]) -> String {
-    let joined = argv.join(" ");
-    text_preview(&joined)
-}
-
-fn text_preview(text: &str) -> String {
-    const MAX: usize = 240;
-    let sanitized = text.replace('\n', "\\n").replace('\r', "\\r");
-    if sanitized.chars().count() <= MAX {
-        sanitized
-    } else {
-        format!("{}...", sanitized.chars().take(MAX).collect::<String>())
-    }
-}
-
-fn error_audit_detail(error: &ConnectorError) -> serde_json::Value {
-    json!({
-        "code": error.code,
-        "message": error.message,
-        "context": error.context,
-    })
 }
 
 fn allowed_local_roots() -> Result<Vec<PathBuf>> {
@@ -753,9 +552,13 @@ mod tests {
     }
 
     #[test]
-    fn audit_preview_truncates_unicode_on_character_boundaries() {
-        let preview = text_preview(&"中".repeat(241));
-        assert!(preview.ends_with("..."));
-        assert_eq!(preview.chars().count(), 243);
+    fn exec_payload_audit_excludes_command_body() {
+        let value = match (ExecPayload::Raw { raw: "private data".into() }) {
+            ExecPayload::Raw { raw } => serde_json::json!({"type":"raw","bytes":raw.len()}),
+            _ => unreachable!(),
+        };
+        assert_eq!(value["type"], "raw");
+        assert!(value.get("preview").is_none());
+        assert_eq!(value["bytes"], 12);
     }
 }

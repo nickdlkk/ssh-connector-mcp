@@ -7,6 +7,7 @@
 use crate::error::{ConnectorError, ErrorCode};
 use crate::state::AppState;
 use crate::types::HostSpec;
+use crate::audit::AuditFilter;
 use axum::{
     Json, Router,
     extract::{
@@ -41,7 +42,8 @@ pub fn router(state: Shared, static_dir: std::path::PathBuf) -> Router {
         .route("/sessions/{id}/close", post(close_session))
         .route("/sessions/{id}/attach", get(attach_session))
         .route("/audit", get(get_audit))
-        .with_state(state);
+        .with_state(state.clone())
+        .route_layer(axum::middleware::from_fn_with_state(state, audit_web_boundary));
 
     Router::new()
         .nest("/api", api)
@@ -81,6 +83,71 @@ impl IntoResponse for ApiError {
 
 type ApiResult = std::result::Result<Json<serde_json::Value>, ApiError>;
 
+// Cross-cutting API audit. This observes completed handler responses, sanitizes
+// both request JSON and returned JSON, and leaves the audited handler response intact.
+async fn audit_web_boundary(
+    State(st): State<Shared>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    use axum::body::to_bytes;
+
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let route = stable_route(&path);
+    let started = std::time::Instant::now();
+    let (parts, body) = request.into_parts();
+    let request_bytes = match to_bytes(body, 1_048_576).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            let method_name = format!("{} {}", method.as_str(), route);
+            let input = serde_json::json!({"entered":false,"body_rejected":true});
+            let record = st.audit.try_record_fields(crate::audit::AuditLog::entry(&method_name), "web_api", input, Some(serde_json::json!({"http_status":413})), Some(started.elapsed().as_millis() as i64), None, None, Some("body_too_large_or_unreadable"));
+            if let Err(error) = record { tracing::error!(target:"audit", method=%method_name, "request rejection audit failed: {error}"); }
+            return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
+        }
+    };
+    let request_body_len = body_for_audit_len(&request_bytes);
+    let request_json = serde_json::from_slice::<serde_json::Value>(&request_bytes).unwrap_or(serde_json::Value::Null);
+    let req = axum::http::Request::from_parts(parts, axum::body::Body::from(request_bytes));
+    let response = next.run(req).await;
+    let status = response.status();
+    let (parts, body) = response.into_parts();
+    let body_for_client = match to_bytes(body, 1_048_576).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            let method_name = format!("{} {}", method.as_str(), route);
+            let audit_input = crate::mcp_audit_policy::sanitize_input(request_json);
+            let record = st.audit.try_record_fields(crate::audit::AuditLog::entry(&method_name), "web_api", audit_input, Some(serde_json::json!({"response_too_large":true})), Some(started.elapsed().as_millis() as i64), None, None, Some("response_too_large"));
+            if let Err(error) = record { tracing::error!(target:"audit", method=%method_name, "response overflow audit failed: {error}"); }
+            return (StatusCode::INTERNAL_SERVER_ERROR, "handler response exceeded audit size cap").into_response();
+        }
+    };
+    let response_json = serde_json::from_slice::<serde_json::Value>(&body_for_client).ok();
+    let method_name = format!("{} {}", method.as_str(), route);
+    let audit_input = crate::mcp_audit_policy::sanitize_input(request_json);
+    let audit_output = if route == "audit" {
+        response_json.as_ref().map(|value| serde_json::json!({"entry_count": value.get("entries").and_then(|entries|entries.as_array()).map_or(0, |entries|entries.len()), "has_next_cursor":value.get("next_cursor").is_some_and(|cursor|!cursor.is_null())}))
+    } else {
+        response_json.as_ref().map(|value| crate::mcp_audit_policy::sanitize_output(value, route))
+    };
+    let err_code = if status.is_client_error() || status.is_server_error() {
+        response_json.as_ref().and_then(|v|v.get("code").or_else(||v.get("error_code"))).and_then(|v|v.as_str()).map(str::to_string).or_else(||Some(status.as_u16().to_string()))
+    } else { None };
+        let audit_result = st.audit.try_record_fields(
+            crate::audit::AuditLog::entry(&method_name), "web_api", audit_input, audit_output,
+            Some(started.elapsed().as_millis() as i64), Some(request_body_len),
+            None, err_code.as_deref(),
+        );
+        if let Err(error) = audit_result {
+            tracing::error!(target:"audit", method=%method_name, "mandatory web audit failed: {error}");
+            return (StatusCode::SERVICE_UNAVAILABLE, "audit unavailable").into_response();
+        }
+        Response::from_parts(parts, axum::body::Body::from(body_for_client))
+}
+
+fn body_for_audit_len(bytes: &axum::body::Bytes) -> i64 { bytes.len() as i64 }
+
 // --- Vault / status ---
 
 async fn status(State(st): State<Shared>) -> ApiResult {
@@ -97,22 +164,12 @@ struct MasterPassword {
 }
 
 async fn vault_init(State(st): State<Shared>, Json(req): Json<MasterPassword>) -> ApiResult {
-    st.vault
-        .init(&req.master_password)
-        .map_err(ApiError::from)?;
-    st.audit.record(
-        crate::audit::AuditLog::entry("vault_init").with_detail(json!({ "source": "web" })),
-    );
+    st.vault.init(&req.master_password).map_err(ApiError::from)?;
     Ok(Json(json!({ "ok": true })))
 }
 
 async fn vault_unlock(State(st): State<Shared>, Json(req): Json<MasterPassword>) -> ApiResult {
-    st.vault
-        .unlock(&req.master_password)
-        .map_err(ApiError::from)?;
-    st.audit.record(
-        crate::audit::AuditLog::entry("vault_unlock").with_detail(json!({ "source": "web" })),
-    );
+    st.vault.unlock(&req.master_password).map_err(ApiError::from)?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -172,16 +229,7 @@ async fn reveal_host(
     Path(id): Path<String>,
     Json(req): Json<MasterPassword>,
 ) -> ApiResult {
-    // Human-only, master-password-gated credential reveal.
-    let (auth, jumps) = st
-        .vault
-        .reveal_credentials(&id, &req.master_password)
-        .map_err(ApiError::from)?;
-    st.audit.record(
-        crate::audit::AuditLog::entry("credential_reveal")
-            .with_host(&id)
-            .with_detail(json!({ "source": "web" })),
-    );
+    let (auth, jumps) = st.vault.reveal_credentials(&id, &req.master_password).map_err(ApiError::from)?;
     Ok(Json(json!({ "auth": auth, "jump_hosts": jumps })))
 }
 
@@ -199,18 +247,17 @@ async fn close_session(State(st): State<Shared>, Path(id): Path<String>) -> ApiR
 
 // --- Audit ---
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct AuditQuery {
-    #[serde(default = "default_limit")]
-    limit: usize,
-}
-fn default_limit() -> usize {
-    200
+    from: Option<String>, to: Option<String>, method: Option<String>, source: Option<String>,
+    host_id: Option<String>, session_id: Option<String>, status: Option<String>, error_code: Option<String>,
+    sort_by: Option<String>, order: Option<String>, limit: Option<usize>, cursor: Option<String>,
 }
 
 async fn get_audit(State(st): State<Shared>, Query(q): Query<AuditQuery>) -> ApiResult {
-    let entries = st.audit.tail(q.limit.min(2000));
-    Ok(Json(json!({ "entries": entries })))
+    let filter = AuditFilter { from:q.from,to:q.to,method:q.method,source:q.source,host_id:q.host_id,session_id:q.session_id,status:q.status,error_code:q.error_code,sort_by:q.sort_by,order:q.order,limit:q.limit,cursor:q.cursor };
+    let (entries,next_cursor)=st.audit.query(&filter).map_err(|e|ApiError(ConnectorError::bad_request(format!("invalid audit query: {e}"))))?;
+    Ok(Json(json!({"entries":entries,"next_cursor":next_cursor})))
 }
 
 // --- WebSocket terminal takeover ---
@@ -282,5 +329,117 @@ async fn attach_socket(socket: WebSocket, st: Shared, session_id: String) {
     tokio::select! {
         _ = to_client => {},
         _ = to_remote => {},
+    }
+}
+
+fn stable_route(path: &str) -> &str {
+    let path = path.strip_prefix("/api").unwrap_or(path);
+    const KNOWN: &[(&str, &str)] = &[
+        ("/status", "status"), ("/vault/init", "vault/init"), ("/vault/unlock", "vault/unlock"),
+        ("/hosts", "hosts"), ("/jumpserver/assets", "jumpserver/assets"), ("/audit", "audit"),
+        ("/sessions", "sessions"),
+    ];
+    for (prefix, route) in KNOWN { if path == *prefix { return route; } }
+    if path.starts_with("/jumpserver/assets/") { return "jumpserver/assets/{asset_id}/accounts"; }
+    if path.starts_with("/hosts/") {
+        if path.ends_with("/connect") { return "hosts/{id}/connect"; }
+        if path.ends_with("/disconnect") { return "hosts/{id}/disconnect"; }
+        if path.ends_with("/reveal") { return "hosts/{id}/reveal"; }
+        return "hosts/{id}";
+    }
+    if path.starts_with("/sessions/") {
+        if path.ends_with("/close") { return "sessions/{id}/close"; }
+        if path.ends_with("/attach") { return "sessions/{id}/attach"; }
+    }
+    "unmatched"
+}
+
+#[cfg(test)]
+mod web_audit_tests {
+    use super::*;
+    use crate::audit::AuditFilter;
+    use crate::config::Config;
+    use crate::vault::Vault;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn test_state() -> (Shared, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ssh-connector-web-audit-{}", time::OffsetDateTime::now_utc().unix_timestamp_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vault = Arc::new(Vault::open(&dir.join("vault.db")).unwrap());
+        vault.init("unit-test-only-master").unwrap();
+        let audit = Arc::new(crate::audit::AuditLog::try_new(dir.join("audit")).unwrap());
+        let config = Config::load_or_init(&dir).unwrap();
+        let state = AppState::new(vault, audit, config, "local-test-token".to_string()).unwrap();
+        (state, dir)
+    }
+
+    #[tokio::test]
+    async fn status_handler_has_one_audit_event_and_preserves_response() {
+        let (state, _) = test_state();
+        let app = router(state.clone(), std::path::PathBuf::from("static"));
+        let response = app.oneshot(axum::http::Request::builder().uri("/api/status").body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let (rows, _) = state.audit.query(&AuditFilter::default()).unwrap();
+        assert_eq!(rows.len(), 1, "rows={rows:?}");
+        assert_eq!(rows[0]["source"], "web_api");
+    }
+
+    #[test]
+    fn records_raw_vault_init_input_only_as_safe_structure() {
+        let input = crate::mcp_audit_policy::sanitize_input(serde_json::json!({"master_password":"must-not-store"}));
+        let output = crate::mcp_audit_policy::sanitize_output(&serde_json::json!({"ok":true}),"POST vault/init");
+        assert!(!input.to_string().contains("must-not-store"));
+        assert_eq!(output["ok"],true);
+    }
+
+    #[tokio::test]
+    async fn vault_init_audit_does_not_store_master_password() {
+        let (state, _) = test_state();
+        // Use a separate, uninitialized vault as init handler is valid only before init.
+        let dir = std::env::temp_dir().join(format!("ssh-connector-web-vault-init-{}", time::OffsetDateTime::now_utc().unix_timestamp_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vault = Arc::new(Vault::open(&dir.join("vault.db")).unwrap());
+        let audit = state.audit.clone();
+        let config = Config::load_or_init(&dir).unwrap();
+        let app_state = AppState::new(vault, audit.clone(), config, "local-test-token".into()).unwrap();
+        let app = router(app_state.clone(), std::path::PathBuf::from("static"));
+        let payload = serde_json::json!({"master_password":"no-store-this-password"});
+        let response=app.oneshot(axum::http::Request::builder().method("POST").uri("/api/vault/init").header("content-type","application/json").body(axum::body::Body::from(payload.to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::OK);
+        let (rows,_) = audit.query(&AuditFilter::default()).unwrap();
+        assert_eq!(rows.len(),1,"rows={rows:?}");
+        let row = rows.iter().find(|row|row["method"]=="POST vault/init").expect("vault init event");
+        let serialized=row.to_string();
+        assert!(!serialized.contains("no-store-this-password"));
+        assert_eq!(row["source"],"web_api");
+    }
+}
+
+
+#[cfg(test)]
+mod web_limit_tests {
+    use super::*;
+    use crate::{config::Config,vault::Vault};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn rejects_large_request_body_without_forwarding_empty_body() {
+        let root=std::env::temp_dir().join(format!("web-body-cap-{}",time::OffsetDateTime::now_utc().unix_timestamp_nanos()));
+        std::fs::create_dir_all(&root).unwrap();
+        let vault=Arc::new(Vault::open(&root.join("vault.db")).unwrap());
+        let audit=Arc::new(crate::audit::AuditLog::try_new(root.join("audit")).unwrap());
+        let config=Config::load_or_init(&root).unwrap();
+        let state=AppState::new(vault,audit.clone(),config,"token".into()).unwrap();
+        let app=router(state.clone(),std::path::PathBuf::from("static"));
+        let huge=vec![b' ';1_048_577];
+        let response=app.oneshot(axum::http::Request::builder().method("POST").uri("/api/vault/init").header("content-type","application/json").body(axum::body::Body::from(huge)).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(!state.vault.is_initialized().unwrap());
+        let (events,_)=state.audit.query(&AuditFilter::default()).unwrap();
+        assert_eq!(events.len(),1);
+        assert_eq!(events[0]["input"]["entered"],false);
+        assert_eq!(events[0]["error_code"],"body_too_large_or_unreadable");
     }
 }
