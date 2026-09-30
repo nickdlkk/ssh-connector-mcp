@@ -46,7 +46,7 @@ SSH Connector MCP separates these responsibilities:
 The recommended production shape is a local daemon plus a Streamable HTTP MCP endpoint:
 
 ```bash
-cargo install --git https://github.com/LCYLYM/ssh-connector-mcp ssh-connector --locked
+cargo install --git https://github.com/nickdlkk/ssh-connector-mcp --tag v0.1.1 ssh-connector --locked
 ssh-connector --data-dir ~/.ssh-connector
 ```
 
@@ -64,7 +64,9 @@ extract `ssh-connector.exe`, and run:
 
 Use the accompanying `SHA256SUMS` file to verify the downloaded archive.
 The release workflow is defined in `.github/workflows/release.yml` and runs
-when a `v*.*.*` tag is pushed.
+when a `v*.*.*` tag is pushed. Release v0.1.1 adds token-based polling for
+long-running commands in an existing PTY session (`session_exec` and
+`session_exec_read`); the initial wait does not cancel the remote command.
 
 Open the Web UI, initialize the vault, and add hosts:
 

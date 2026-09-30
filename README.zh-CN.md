@@ -46,7 +46,7 @@ SSH Connector MCP 把职责拆开：
 推荐的生产形态是本地 daemon + Streamable HTTP MCP endpoint：
 
 ```bash
-cargo install --git https://github.com/LCYLYM/ssh-connector-mcp ssh-connector --locked
+cargo install --git https://github.com/nickdlkk/ssh-connector-mcp --tag v0.1.1 ssh-connector --locked
 ssh-connector --data-dir ~/.ssh-connector
 ```
 
@@ -64,7 +64,9 @@ ssh-connector --data-dir ~/.ssh-connector
 ```
 
 可使用同一 Release 中的 `SHA256SUMS` 校验下载文件。发布工作流位于
-`.github/workflows/release.yml`，推送 `v*.*.*` 标签后会自动构建并发布。
+`.github/workflows/release.yml`，推送 `v*.*.*` 标签后会自动构建并发布。v0.1.1
+新增已有 PTY 会话的长命令 token 轮询工具（`session_exec` 与
+`session_exec_read`）；首次等待结束不会取消远端命令。
 
 打开 Web UI，初始化 vault 并添加主机：
 
