@@ -39,6 +39,7 @@ pub struct AuditFilter {
     pub from: Option<String>,
     pub to: Option<String>,
     pub method: Option<String>,
+    pub methods: Vec<String>,
     pub source: Option<String>,
     pub host_id: Option<String>,
     pub session_id: Option<String>,
@@ -193,7 +194,18 @@ impl AuditLog {
         let mut sql = String::from("SELECT id,ts_utc,method,source,host_id,session_id,status,duration_ms,input_json,output_json,input_bytes,output_bytes,truncated,error_code,legacy_action,caller,exit_code,detail_json FROM audit_events WHERE ts_utc>=?");
         let mut args: Vec<rusqlite::types::Value> = vec![from.into()];
         if let Some(end) = to { sql.push_str(" AND ts_utc<=?"); args.push(end.into()); }
-        for (column, value) in [("method", &filter.method), ("source", &filter.source), ("host_id", &filter.host_id), ("session_id", &filter.session_id), ("status", &filter.status), ("error_code", &filter.error_code)] {
+        if let Some(value) = &filter.method { sql.push_str(" AND method=?"); args.push(value.clone().into()); }
+        if !filter.methods.is_empty() {
+            let methods: Vec<String> = filter.methods.iter().filter(|method| !method.is_empty()).cloned().collect();
+            if methods.len() > 32 { return Err(rusqlite::Error::InvalidParameterName("at most 32 methods may be selected".into())); }
+            if !methods.is_empty() {
+                sql.push_str(" AND method IN (");
+                for index in 0..methods.len() { if index > 0 { sql.push(','); } sql.push('?'); }
+                sql.push(')');
+                args.extend(methods.into_iter().map(Into::into));
+            }
+        }
+        for (column, value) in [("source", &filter.source), ("host_id", &filter.host_id), ("session_id", &filter.session_id), ("status", &filter.status), ("error_code", &filter.error_code)] {
             if let Some(value) = value { sql.push_str(" AND "); sql.push_str(column); sql.push_str("=?"); args.push(value.clone().into()); }
         }
         if let Some((ts, id)) = cursor {
@@ -391,6 +403,19 @@ mod tests {
         let (second, _) = store.query(&AuditFilter { method:Some("page".into()), limit: Some(2), cursor:Some(cursor), ..Default::default() }).unwrap();
         assert_eq!(second.len(), 2);
         assert_ne!(first[1]["id"], second[0]["id"]);
+    }
+
+    #[test]
+    fn filters_multiple_methods_as_a_union_and_caps_selection() {
+        let (store, _) = temp_store();
+        for method in ["alpha", "beta", "gamma"] {
+            store.record_fields(AuditLog::entry(method), "mcp", serde_json::json!({}), Some(serde_json::json!({"status":"ok"})), None, None, None, None);
+        }
+        let (rows, _) = store.query(&AuditFilter { methods:vec!["alpha".into(),"gamma".into()], ..Default::default() }).unwrap();
+        assert_eq!(rows.len(),2);
+        assert!(rows.iter().all(|row| row["method"]=="alpha" || row["method"]=="gamma"));
+        let too_many=(0..33).map(|index|format!("method-{index}")).collect();
+        assert!(store.query(&AuditFilter { methods:too_many, ..Default::default() }).is_err());
     }
 
     #[test]

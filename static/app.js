@@ -71,7 +71,34 @@ const el = {
   auditStatus:      () => $('audit-status'),
   auditLoading:     () => $('audit-loading'),
   auditEmpty:       () => $('audit-empty'),
+  auditTableSection:() => $('audit-table-section'),
+  auditResultCount: () => $('audit-result-count'),
+  auditPageLabel:   () => $('audit-page-label'),
+  auditEmptyReset:  () => $('audit-empty-reset'),
   auditList:        () => $('audit-list'),
+  auditTableWrap:   () => $('audit-table-wrap'),
+  auditTableBody:   () => $('audit-table-body'),
+  auditFrom:        () => $('audit-from'),
+  auditTo:          () => $('audit-to'),
+  auditMethodSearch: () => $('audit-method-search'),
+  auditMethodOptions:() => $('audit-method-options'),
+  auditMethodTrigger:() => $('audit-method-trigger'),
+  auditMethodCount:  () => $('audit-method-selected-count'),
+  auditMethodSelectAll:() => $('audit-method-select-all'),
+  auditMethodClear:  () => $('audit-method-clear'),
+  auditMethodCustomToggle: () => $('audit-method-custom-toggle'),
+  auditMethodCustom: () => $('audit-method-custom'),
+  auditSource:      () => $('audit-source'),
+  auditHost:        () => $('audit-host'),
+  auditSession:     () => $('audit-session'),
+  auditStatusFilter:() => $('audit-status-filter'),
+  auditPageSize:    () => $('audit-page-size'),
+  auditApply:       () => $('audit-apply'),
+  auditReset:       () => $('audit-reset'),
+  auditPagination:  () => $('audit-pagination'),
+  auditPageInfo:    () => $('audit-page-info'),
+  auditPrev:        () => $('audit-prev'),
+  auditNext:        () => $('audit-next'),
   auditRefresh:     () => $('audit-refresh'),
   // Host modal
   hostModal:        () => $('host-modal'),
@@ -149,7 +176,7 @@ const api = {
   revealHost:      (id, mp) => apiFetch('POST',   `/hosts/${id}/reveal`, { master_password: mp }),
   getSessions:     ()       => apiFetch('GET',    '/sessions'),
   closeSession:    (id)     => apiFetch('POST',   `/sessions/${id}/close`),
-  getAudit:        ()       => apiFetch('GET',    '/audit?limit=200'),
+  getAudit:        (params) => apiFetch('GET',    `/audit${params ? `?${params}` : ''}`),
 };
 
 // ── Toast notifications ─────────────────────────────────────────
@@ -945,14 +972,58 @@ function closeTerminal() {
 }
 
 // ── Audit view ──────────────────────────────────────────────────
-async function loadAudit() {
+const auditPaging = { cursor: null, history: [], hasNext: false, totalShown: 0, sortBy:'ts_utc', order:'desc' };
+function auditQuery(resetCursor = true) {
+  if (resetCursor) { auditPaging.cursor = null; auditPaging.history = []; }
+  const params = new URLSearchParams();
+  const values = [
+    ['from', el.auditFrom().value], ['to', el.auditTo().value],
+    ['source', el.auditSource().value], ['host_id', el.auditHost().value.trim()],
+    ['session_id', el.auditSession().value.trim()], ['status', el.auditStatusFilter().value],
+  ];
+  for (const [key,value] of values) if (value) params.set(key, key === 'from' || key === 'to' ? new Date(value).toISOString() : value);
+  const chosenMethods = selectedAuditMethods();
+  if (chosenMethods.length === 1) params.set('method', chosenMethods[0]);
+  else if (chosenMethods.length > 1) params.set('methods', chosenMethods.join(','));
+  params.set('limit', el.auditPageSize().value || '100');
+  params.set('sort_by', auditPaging.sortBy || 'ts_utc');
+  params.set('order', auditPaging.order || 'desc');
+  if (auditPaging.cursor) params.set('cursor', auditPaging.cursor);
+  return params.toString();
+}
+function selectedAuditMethods() {
+  const methods=[...el.auditMethodOptions().querySelectorAll('input[type="checkbox"]:checked')].map(box=>box.value);
+  if (el.auditMethodCustomToggle().checked) {
+    const custom=el.auditMethodCustom().value.trim();
+    if (custom) methods.push(custom);
+  }
+  return [...new Set(methods)];
+}
+function updateAuditMethodCount() {
+  const count=selectedAuditMethods().length;
+  el.auditMethodCount().textContent=count?`已选 ${count} 项`:'未选';
+  el.auditMethodTrigger().textContent=count?`已选 ${count} 项`:'全部方法';
+}
+function filterAuditMethodOptions() {
+  const query=el.auditMethodSearch().value.trim().toLowerCase();
+  el.auditMethodOptions().querySelectorAll('.audit-method-option').forEach(label=>{
+    label.classList.toggle('hidden',Boolean(query)&&!label.textContent.toLowerCase().includes(query));
+  });
+}
+
+async function loadAudit({ resetCursor = true } = {}) {
+  if (resetCursor) { auditPaging.cursor = null; auditPaging.history = []; auditPaging.totalShown = 0; }
   el.auditLoading().classList.remove('hidden');
   el.auditEmpty().classList.add('hidden');
-  el.auditList().classList.add('hidden');
+  el.auditTableSection().classList.add('hidden');
+  el.auditPagination().classList.add('hidden');
   el.auditStatus().classList.add('hidden');
   try {
-    const data = await api.getAudit();
+    const data = await api.getAudit(auditQuery(false));
     const entries = Array.isArray(data) ? data : (data.entries || []);
+    auditPaging.hasNext = Boolean(data.next_cursor);
+    auditPaging.nextCursor = data.next_cursor || null;
+    auditPaging.totalShown += entries.length;
     renderAudit(entries);
   } catch (e) {
     showStatus(el.auditStatus(), describeError(e), 'error');
@@ -960,39 +1031,98 @@ async function loadAudit() {
     el.auditLoading().classList.add('hidden');
   }
 }
-
+function auditCell(value, className = '') {
+  const td = document.createElement('td');
+  if (className) td.className = className;
+  if (value instanceof Node) td.appendChild(value); else td.textContent = value == null ? '' : String(value);
+  return td;
+}
+function auditSummary(value) {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  try { return JSON.stringify(value); } catch (_) { return String(value); }
+}
 function renderAudit(entries) {
+  const body = el.auditTableBody();
+  body.replaceChildren();
   if (!entries.length) {
     el.auditEmpty().classList.remove('hidden');
+    el.auditTableSection().classList.add('hidden');
+    el.auditPagination().classList.add('hidden');
     return;
   }
-  el.auditList().classList.remove('hidden');
-  const list = el.auditList();
-  list.innerHTML = '';
-  entries.forEach((entry) => {
-    const div = document.createElement('div');
-    div.className = 'audit-entry';
-    const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : (entry.ts || '');
-    const rawAction = entry.action || entry.event || JSON.stringify(entry).slice(0, 80);
-    const action = auditActionLabel(rawAction);
-    const host = entry.host || entry.alias || entry.host_id || '';
-    const detail = auditDetailText(entry);
-    const exitCode = entry.exit_code != null ? `退出码:${entry.exit_code}` : '';
-    div.innerHTML = `
-      <span class="audit-ts">${escHtml(ts)}</span>
-      <span class="audit-action">${escHtml(action)}</span>
-      <span class="audit-host">${escHtml(host)}</span>
-      <span class="audit-detail">${escHtml(detail)} ${escHtml(exitCode)}</span>`;
-    list.appendChild(div);
-  });
+  el.auditEmpty().classList.add('hidden');
+  el.auditTableSection().classList.remove('hidden');
+  for (const entry of entries) {
+    const row = document.createElement('tr');
+    const rawTime = entry.ts_utc || entry.ts || '';
+    const date = rawTime ? new Date(rawTime) : null;
+    const timeLabel = date && !Number.isNaN(date.valueOf()) ? date.toLocaleString(undefined,{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : rawTime;
+    const method = entry.method || entry.action || '—';
+    const sourceLabels = {mcp:'MCP',web_api:'Web API',migration:'旧日志'};
+    const source = document.createElement('span'); source.className = `audit-source-badge ${entry.source === 'mcp' ? 'source-mcp' : entry.source === 'web_api' ? 'source-web' : 'source-legacy'}`; source.textContent = sourceLabels[entry.source] || entry.source || '—';
+    const status = document.createElement('span'); status.className = `audit-status${entry.status === 'error' ? ' error' : ''}`; status.textContent = entry.status === 'error' ? '失败' : entry.status === 'success' ? '成功' : '—';
+    const hostSession = document.createElement('div'); hostSession.className = 'audit-identity';
+    const host = document.createElement('span'); host.className='audit-host-id'; host.textContent=entry.host_id || '—'; hostSession.appendChild(host);
+    if (entry.session_id) { const sid=document.createElement('small');sid.textContent=`会话 ${entry.session_id}`;hostSession.appendChild(sid); }
+    const input = document.createElement('div'); input.className = 'audit-json'; input.textContent = auditSummary(entry.input ?? entry.detail);
+    const output = document.createElement('div'); output.className = 'audit-json'; output.textContent = auditSummary(entry.output ?? entry.error_code);
+    row.append(
+      auditCell(entry.id, 'mono audit-id'), auditCell(timeLabel, 'mono audit-time'), auditCell(method, 'audit-method'),
+      auditCell(source), auditCell(status), auditCell(hostSession),
+      auditCell(entry.duration_ms == null ? '—' : `${entry.duration_ms} ms`, 'mono audit-duration'),
+      auditCell(input), auditCell(output),
+    );
+    body.appendChild(row);
+  }
+  el.auditResultCount().textContent=String(entries.length);
+  el.auditPagination().classList.remove('hidden');
+  const page = auditPaging.history.length + 1;
+  el.auditPageInfo().textContent = `第 ${page} 页 · 本页 ${entries.length} 条`;
+  el.auditPageLabel().textContent=String(page);
+  el.auditPrev().disabled = auditPaging.history.length === 0;
+  el.auditNext().disabled = !auditPaging.hasNext;
+  updateAuditSortHeaders();
+  updateAuditMethodCount();
 }
 
-function auditDetailText(entry) {
-  if (entry.detail != null) {
-    if (typeof entry.detail === 'string') return entry.detail;
-    return JSON.stringify(entry.detail, null, 2);
-  }
-  return entry.message || entry.error || '';
+function updateAuditSortHeaders() {
+  document.querySelectorAll('[data-audit-sort]').forEach((button) => {
+    const active=button.dataset.auditSort===auditPaging.sortBy;
+    button.classList.toggle('active',active);
+    const indicator=button.querySelector('span');
+    if (indicator) indicator.textContent=active?(auditPaging.order==='asc'?'↑':'↓'):'';
+    button.setAttribute('aria-sort',active?(auditPaging.order==='asc'?'ascending':'descending'):'none');
+  });
+}
+function toggleAuditSort(field) {
+  if (auditPaging.sortBy===field) auditPaging.order=auditPaging.order==='asc'?'desc':'asc';
+  else { auditPaging.sortBy=field; auditPaging.order=field==='id'?'desc':'desc'; }
+  updateAuditSortHeaders();
+  loadAudit();
+}
+
+async function auditNextPage() {
+  if (!auditPaging.nextCursor) return;
+  auditPaging.history.push(auditPaging.cursor);
+  auditPaging.cursor = auditPaging.nextCursor;
+  await loadAudit({resetCursor:false});
+}
+async function auditPrevPage() {
+  if (!auditPaging.history.length) return;
+  auditPaging.cursor = auditPaging.history.pop() || null;
+  auditPaging.totalShown = auditPaging.history.length * Number(el.auditPageSize().value || 100);
+  await loadAudit({resetCursor:false});
+}
+function resetAuditFilters() {
+  for (const id of ['audit-from','audit-to','audit-method-search','audit-method-custom','audit-source','audit-host','audit-session','audit-status-filter']) $(id).value = '';
+  el.auditMethodOptions().querySelectorAll('input[type="checkbox"]').forEach(box=>{box.checked=false;});
+  el.auditMethodCustomToggle().checked=false;
+  el.auditMethodCustom().classList.add('hidden');
+  filterAuditMethodOptions(); updateAuditMethodCount();
+  el.auditPageSize().value = '100';
+  auditPaging.sortBy='ts_utc'; auditPaging.order='desc'; updateAuditSortHeaders();
+  loadAudit();
 }
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -1130,7 +1260,36 @@ function attachEventListeners() {
   el.termClose().addEventListener('click', closeTerminal);
 
   // Audit
-  el.auditRefresh().addEventListener('click', loadAudit);
+  el.auditRefresh().addEventListener('click', () => loadAudit());
+  el.auditEmptyReset().addEventListener('click', resetAuditFilters);
+  el.auditApply().addEventListener('click', () => loadAudit());
+  el.auditMethodCustomToggle().addEventListener('change', () => {
+    const custom=el.auditMethodCustomToggle().checked;
+    el.auditMethodCustom().classList.toggle('hidden',!custom);
+    if (custom) el.auditMethodCustom().focus(); else el.auditMethodCustom().value='';
+    updateAuditMethodCount();
+  });
+  const methodFilter=el.auditMethodTrigger().closest('.audit-filter-method-multiselect');
+  const setMethodMenuOpen=(open)=>{methodFilter.classList.toggle('method-menu-open',open);el.auditMethodTrigger().setAttribute('aria-expanded',String(open));if(open)el.auditMethodSearch().focus();};
+  el.auditMethodTrigger().addEventListener('click',()=>setMethodMenuOpen(!methodFilter.classList.contains('method-menu-open')));
+  document.addEventListener('click',(event)=>{if(!methodFilter.contains(event.target))setMethodMenuOpen(false);});
+  methodFilter.addEventListener('keydown',(event)=>{if(event.key==='Escape'){setMethodMenuOpen(false);el.auditMethodTrigger().focus();}});
+  el.auditMethodSearch().addEventListener('keydown',(event)=>{if(event.key==='Escape'){setMethodMenuOpen(false);el.auditMethodTrigger().focus();}});
+  const values = [
+    ...el.auditMethodOptions().querySelectorAll('input[type="checkbox"]'),
+  ];
+  const selected = selectedAuditMethods();
+  el.auditMethodCount().textContent = selected.length ? `已选 ${selected.length} 项` : '未选';
+  values.forEach(box => { box.checked = selected.includes(box.value); });
+  el.auditMethodSearch().addEventListener('input',filterAuditMethodOptions);
+  el.auditMethodSelectAll().addEventListener('click',()=>{el.auditMethodOptions().querySelectorAll('.audit-method-option:not(.hidden) input').forEach(box=>{box.checked=true;});updateAuditMethodCount();});
+  el.auditMethodClear().addEventListener('click',()=>{el.auditMethodOptions().querySelectorAll('input[type="checkbox"]').forEach(box=>{box.checked=false;});updateAuditMethodCount();});
+  el.auditReset().addEventListener('click', resetAuditFilters);
+  el.auditPrev().addEventListener('click', auditPrevPage);
+  el.auditNext().addEventListener('click', auditNextPage);
+  document.querySelectorAll('[data-audit-sort]').forEach((button)=>button.addEventListener('click',()=>toggleAuditSort(button.dataset.auditSort)));
+  updateAuditSortHeaders();
+  [el.auditMethodCustom(),el.auditHost(),el.auditSession()].forEach((input) => input.addEventListener('keydown',(event)=>{if(event.key==='Enter')loadAudit();}));
 
   // Reveal modal
   el.revealModalClose().addEventListener('click', closeRevealModal);

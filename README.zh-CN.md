@@ -46,7 +46,7 @@ SSH Connector MCP 把职责拆开：
 推荐的生产形态是本地 daemon + Streamable HTTP MCP endpoint：
 
 ```bash
-cargo install --git https://github.com/nickdlkk/ssh-connector-mcp --tag v0.1.1 ssh-connector --locked
+cargo install --git https://github.com/nickdlkk/ssh-connector-mcp --tag v0.1.2 ssh-connector --locked
 ssh-connector --data-dir ~/.ssh-connector
 ```
 

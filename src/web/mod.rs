@@ -249,13 +249,16 @@ async fn close_session(State(st): State<Shared>, Path(id): Path<String>) -> ApiR
 
 #[derive(Deserialize, Default)]
 struct AuditQuery {
-    from: Option<String>, to: Option<String>, method: Option<String>, source: Option<String>,
+    from: Option<String>, to: Option<String>, method: Option<String>, methods: Option<Vec<String>>, source: Option<String>,
     host_id: Option<String>, session_id: Option<String>, status: Option<String>, error_code: Option<String>,
     sort_by: Option<String>, order: Option<String>, limit: Option<usize>, cursor: Option<String>,
 }
 
 async fn get_audit(State(st): State<Shared>, Query(q): Query<AuditQuery>) -> ApiResult {
-    let filter = AuditFilter { from:q.from,to:q.to,method:q.method,source:q.source,host_id:q.host_id,session_id:q.session_id,status:q.status,error_code:q.error_code,sort_by:q.sort_by,order:q.order,limit:q.limit,cursor:q.cursor };
+    if q.methods.as_ref().is_some_and(|methods| methods.len() > 32) {
+        return Err(ApiError(ConnectorError::bad_request("at most 32 methods may be selected")));
+    }
+    let filter = AuditFilter { from:q.from,to:q.to,method:q.method,methods:q.methods.unwrap_or_default(),source:q.source,host_id:q.host_id,session_id:q.session_id,status:q.status,error_code:q.error_code,sort_by:q.sort_by,order:q.order,limit:q.limit,cursor:q.cursor };
     let (entries,next_cursor)=st.audit.query(&filter).map_err(|e|ApiError(ConnectorError::bad_request(format!("invalid audit query: {e}"))))?;
     Ok(Json(json!({"entries":entries,"next_cursor":next_cursor})))
 }
@@ -441,5 +444,33 @@ mod web_limit_tests {
         assert_eq!(events.len(),1);
         assert_eq!(events[0]["input"]["entered"],false);
         assert_eq!(events[0]["error_code"],"body_too_large_or_unreadable");
+    }
+}
+
+
+#[cfg(test)]
+mod web_audit_query_tests {
+    use super::*;
+    use crate::{config::Config,vault::Vault};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn audit_route_filters_source_and_returns_cursor_shape() {
+        let root=std::env::temp_dir().join(format!("web-audit-filter-{}",time::OffsetDateTime::now_utc().unix_timestamp_nanos()));
+        std::fs::create_dir_all(&root).unwrap();
+        let vault=Arc::new(Vault::open(&root.join("vault.db")).unwrap());vault.init("unit-master").unwrap();
+        let audit=Arc::new(crate::audit::AuditLog::try_new(root.join("audit")).unwrap());
+        audit.try_record_fields(crate::audit::AuditLog::entry("alpha"),"mcp",serde_json::json!({}),Some(serde_json::json!({"ok":true})),None,None,None,None).unwrap();
+        audit.try_record_fields(crate::audit::AuditLog::entry("beta"),"web_api",serde_json::json!({}),Some(serde_json::json!({"ok":true})),None,None,None,None).unwrap();
+        let state=AppState::new(vault,audit,Config::load_or_init(&root).unwrap(),"token".into()).unwrap();
+        let app=router(state,std::path::PathBuf::from("static"));
+        let response=app.oneshot(axum::http::Request::builder().uri("/api/audit?source=mcp&limit=1").body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::OK);
+        let body=axum::body::to_bytes(response.into_body(),65536).await.unwrap();
+        let json:serde_json::Value=serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["entries"].as_array().unwrap().len(),1);
+        assert_eq!(json["entries"][0]["source"],"mcp");
+        assert!(json.get("next_cursor").is_some());
     }
 }
