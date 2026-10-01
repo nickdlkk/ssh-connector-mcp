@@ -274,7 +274,7 @@ Nick明确反馈无需过度缜密，并允许最终替代生产。本计划已�
 ### 方法多选恢复下拉交互（2026-10-01）
 
 - Nick反馈方法多选不应直接展开成常驻复选框列表，要求改回下拉多选。现增加“全部方法/已选 N 项”触发按钮；点击展开搜索、全选/清空和复选选项，点击外部或按 Escape 收起，支持 36 个预设项及既有自定义方法并集筛选。
-- 验证：`node --check static/app.js`、HTML parser、ID唯一性检查、`git diff --check`通过；`cargo test --locked web_audit_query_tests` 1 passed。真实浏览器截图/像素验收未执行。
+- 初步验证：`node --check static/app.js`、HTML parser、ID唯一性检查、`git diff --check`通过；`cargo test --locked web_audit_query_tests` 1 passed。真实浏览器验收随后补做，见下方 Chromium 记录。
 - 生产更新前备份 `index.html/app.js/style.css` 至 `/root/.hermes/profiles/ops/.ssh-connector/rollback-ui-method-dropdown-multiselect-2026-10-01/`；更新后生产HTTP三资源均200，响应字节与生产磁盘一致，页面返回包含下拉触发控件和36个方法项。服务仍active、版本0.1.2，未重启后端。
 
 
@@ -285,7 +285,7 @@ Nick明确反馈无需过度缜密，并允许最终替代生产。本计划已�
 - 生产 SQLite `integrity_check=ok`、权限0600、27个源JSONL仍在；但直接SQL复核发现超过7天的旧行仍存在。源码目前在进程启动时清理且查询排除过期行，并无周期清理调度；阶段2原要求有启动及周期清理，需补上周期任务或明确调整计划，不能报告完全满足。
 - 本轮修复门禁：用隔离及生产API验证单选/多选 `methods` 只返回选中集合、包含重复 query 参数与自定义项、错误参数/超32项拒绝；验证每次 audit 查询自身的审计事件不会污染被返回结果；完成后再部署并读回生产API结果与服务状态。
 - 保留期门禁：为审计 store 增加定期清理（建议小时级）；提供可控测试证明任务运行后删除严格早于滚动7×24小时的记录、保留边界记录，并保证查询不返回过期数据；清理失败须可观测。验证生产旧过期行处理前先备份 SQLite/WAL 一致快照并记录删除计数。
-- Rust `cargo fmt --check` 与 `cargo clippy --all-targets --all-features -- -D warnings` 在当前环境因 cargo 子命令未安装而不能运行；报告为未执行，不视作通过。真实浏览器视觉验收仍待做。
+- Rust `cargo fmt --check` 与 `cargo clippy --all-targets --all-features -- -D warnings` 在当前环境因 cargo 子命令未安装而不能运行；报告为未执行，不视作通过。浏览器验收随后完成，见下方记录。
 
 
 ### 2026-10-01 多选过滤与周期清理修复完成
@@ -305,3 +305,9 @@ Nick明确反馈无需过度缜密，并允许最终替代生产。本计划已�
 - 使用本机 Chromium 152 + Playwright Core，对生产静态资源的独立隔离副本（单独临时 data dir/17603，拷贝生产数据库一致快照，未触碰生产凭据）进行 headless 真浏览器交互验收。审计页渲染36个预设方法项；方法下拉默认收起，点击展开搜索、全选/清空及复选项，选择 `host_list` 后触发器与已选计数均显示“已选 1 项”，Apply 后结果仅2条 `host_list`，查询无误带入 `GET audit`。搜索“exec”仅显示3个匹配项；Escape收起下拉；重置后触发器恢复“全部方法”。
 - 浏览器无 console/page errors，页面没有横向溢出（1440px viewport：scrollWidth=clientWidth=1440）。截图：`/tmp/audit-browser-verified.png`。此轮同时发现并修正此前选择复选框后触发器/计数未实时更新的问题；加入 checkbox change 监听及初始化时同步按钮文案。
 - 修正版静态资源更新前备份到 `/root/.hermes/profiles/ops/.ssh-connector/rollback-ui-audit-browser-verified-2026-10-01/`。生产HTTP回读 index/app.js/style.css/favicon.svg 全部200，响应与生产磁盘字节完全一致；服务保持active，后端未重启。
+
+
+### 2026-10-01 Chromium 实测修复提交
+
+- 浏览器实测发现触发器默认状态正确，但用户勾选方法后计数/按钮文本没有即时变化；已添加复选框 `change` 监听，并在视图初始化时同步触发器文案。二次 Playwright 实测复选后立即显示“已选 1 项”，筛选结果仅2条 `host_list`，搜索、Escape、重置、无横向溢出及无浏览器错误均通过。
+- 生产静态资源已按上条记录备份、更新并HTTP读回验证。本次修复及执行记录已提交推送：`eb8f3ab fix(ui): update selected audit method count`；远端 `origin/main` 与本地 HEAD 一致，工作区干净。
