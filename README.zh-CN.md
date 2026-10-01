@@ -39,6 +39,7 @@ SSH Connector MCP 把职责拆开：
 - **连接生命周期**：SSH transport 会复用；一次性操作按需连接；删除主机会断开对应 live connection。
 - **跳板和多认证方式**：支持密码、带可选 passphrase 的私钥、keyboard-interactive，以及每跳独立认证的跳板链。
 - **审计日志**：本地 SQLite（`audit.sqlite3`），UTC 滚动保留 7 天、导入旧 JSONL，支持筛选/排序/游标分页和有界脱敏；不存储 WebSocket 帧正文。详见 [`docs/audit-sqlite.md`](docs/audit-sqlite.md)。
+- **滚动清理与方法多选**：启动时及每小时清理过期事件（可用 `SSH_CONNECTOR_AUDIT_PRUNE_INTERVAL_SECS` 调整周期）。`GET /api/audit` 支持重复 `methods` 参数，按任一所选方法匹配。
 - **适合 MacBook 常驻**：空闲 daemon 很轻量，不创建阻止系统睡眠的电源断言。
 
 ## 一条命令安装

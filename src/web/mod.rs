@@ -11,7 +11,7 @@ use crate::audit::AuditFilter;
 use axum::{
     Json, Router,
     extract::{
-        Path, Query, State,
+        Path, Query, RawQuery, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::StatusCode,
@@ -249,16 +249,21 @@ async fn close_session(State(st): State<Shared>, Path(id): Path<String>) -> ApiR
 
 #[derive(Deserialize, Default)]
 struct AuditQuery {
-    from: Option<String>, to: Option<String>, method: Option<String>, methods: Option<Vec<String>>, source: Option<String>,
+    from: Option<String>, to: Option<String>, method: Option<String>, source: Option<String>,
     host_id: Option<String>, session_id: Option<String>, status: Option<String>, error_code: Option<String>,
     sort_by: Option<String>, order: Option<String>, limit: Option<usize>, cursor: Option<String>,
 }
 
-async fn get_audit(State(st): State<Shared>, Query(q): Query<AuditQuery>) -> ApiResult {
-    if q.methods.as_ref().is_some_and(|methods| methods.len() > 32) {
+async fn get_audit(State(st): State<Shared>, RawQuery(raw): RawQuery, Query(q): Query<AuditQuery>) -> ApiResult {
+    let methods: Vec<String> = url::form_urlencoded::parse(raw.as_deref().unwrap_or_default().as_bytes())
+        .filter(|(key, _)| key == "methods")
+        .map(|(_, value)| value.into_owned())
+        .filter(|value| !value.is_empty())
+        .collect();
+    if methods.len() > 32 {
         return Err(ApiError(ConnectorError::bad_request("at most 32 methods may be selected")));
     }
-    let filter = AuditFilter { from:q.from,to:q.to,method:q.method,methods:q.methods.unwrap_or_default(),source:q.source,host_id:q.host_id,session_id:q.session_id,status:q.status,error_code:q.error_code,sort_by:q.sort_by,order:q.order,limit:q.limit,cursor:q.cursor };
+    let filter = AuditFilter { from:q.from,to:q.to,method:q.method,methods,source:q.source,host_id:q.host_id,session_id:q.session_id,status:q.status,error_code:q.error_code,sort_by:q.sort_by,order:q.order,limit:q.limit,cursor:q.cursor };
     let (entries,next_cursor)=st.audit.query(&filter).map_err(|e|ApiError(ConnectorError::bad_request(format!("invalid audit query: {e}"))))?;
     Ok(Json(json!({"entries":entries,"next_cursor":next_cursor})))
 }
@@ -472,5 +477,37 @@ mod web_audit_query_tests {
         assert_eq!(json["entries"].as_array().unwrap().len(),1);
         assert_eq!(json["entries"][0]["source"],"mcp");
         assert!(json.get("next_cursor").is_some());
+    }
+
+    #[tokio::test]
+    async fn audit_route_filters_repeated_method_parameters_as_union() {
+        let root=std::env::temp_dir().join(format!("web-audit-methods-{}",time::OffsetDateTime::now_utc().unix_timestamp_nanos()));
+        std::fs::create_dir_all(&root).unwrap();
+        let vault=Arc::new(Vault::open(&root.join("vault.db")).unwrap());vault.init("unit-master").unwrap();
+        let audit=Arc::new(crate::audit::AuditLog::try_new(root.join("audit")).unwrap());
+        for method in ["alpha","beta","gamma"] { audit.try_record_fields(crate::audit::AuditLog::entry(method),"mcp",serde_json::json!({}),Some(serde_json::json!({"ok":true})),None,None,None,None).unwrap(); }
+        let state=AppState::new(vault,audit,Config::load_or_init(&root).unwrap(),"token".into()).unwrap();
+        let app=router(state,std::path::PathBuf::from("static"));
+        let response=app.oneshot(axum::http::Request::builder().uri("/api/audit?limit=50&methods=alpha&methods=gamma&source=mcp").body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        if response.status()!=StatusCode::OK { panic!("status={} body={}",response.status(),axum::body::to_bytes(response.into_body(),65536).await.unwrap().escape_ascii()); }
+        let body=axum::body::to_bytes(response.into_body(),65536).await.unwrap();
+        let json:serde_json::Value=serde_json::from_slice(&body).unwrap();
+        let rows=json["entries"].as_array().unwrap();
+        assert_eq!(rows.len(),2);
+        assert!(rows.iter().all(|row| row["method"]=="alpha" || row["method"]=="gamma"));
+        assert!(!rows.iter().any(|row| row["method"]=="GET audit"));
+    }
+
+    #[tokio::test]
+    async fn audit_route_rejects_more_than_32_repeated_methods() {
+        let root=std::env::temp_dir().join(format!("web-audit-method-limit-{}",time::OffsetDateTime::now_utc().unix_timestamp_nanos()));
+        std::fs::create_dir_all(&root).unwrap();
+        let vault=Arc::new(Vault::open(&root.join("vault.db")).unwrap());vault.init("unit-master").unwrap();
+        let audit=Arc::new(crate::audit::AuditLog::try_new(root.join("audit")).unwrap());
+        let state=AppState::new(vault,audit,Config::load_or_init(&root).unwrap(),"token".into()).unwrap();
+        let app=router(state,std::path::PathBuf::from("static"));
+        let params=(0..33).map(|i|format!("methods=m{i}")).collect::<Vec<_>>().join("&");
+        let response=app.oneshot(axum::http::Request::builder().uri(format!("/api/audit?{params}")).body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::BAD_REQUEST);
     }
 }

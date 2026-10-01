@@ -3049,6 +3049,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
  "vt100",
  "zeroize",
 ]

@@ -39,6 +39,7 @@ SSH Connector MCP separates these responsibilities:
 - **Connection lifecycle**: SSH transports are pooled and reused; one-shot operations connect on demand; removing a host drops its live connection.
 - **Jump hosts and multiple auth modes**: password, private key with optional passphrase, keyboard-interactive, and per-hop jump chains.
 - **Audit log**: local SQLite (`audit.sqlite3`) with a rolling seven-day UTC retention window, legacy JSONL import, query filters/sorting/cursors, and bounded redaction policy; WebSocket frame bodies are excluded. See [`docs/audit-sqlite.md`](docs/audit-sqlite.md).
+- **Rolling cleanup and method multi-select**: expired rows are pruned at startup and hourly (interval override: `SSH_CONNECTOR_AUDIT_PRUNE_INTERVAL_SECS`). `GET /api/audit` accepts repeated `methods` query parameters; any selected method matches.
 - **MacBook-friendly idle profile**: idle daemon is lightweight; no sleep-preventing power assertion.
 
 ## Install In One Command

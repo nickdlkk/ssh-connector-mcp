@@ -32,6 +32,22 @@ pub async fn run(opts: DaemonOptions) -> anyhow::Result<()> {
     }
     let vault = Arc::new(Vault::open(&data_dir.join("vault.db"))?);
     let audit = Arc::new(AuditLog::try_new(data_dir.join("audit"))?);
+    let audit_retention = audit.clone();
+    let retention_interval_secs = std::env::var("SSH_CONNECTOR_AUDIT_PRUNE_INTERVAL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(60 * 60);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(retention_interval_secs));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(error) = audit_retention.prune() {
+                tracing::error!(target: "audit", "periodic audit retention cleanup failed: {error}");
+            }
+        }
+    });
 
     // Optional headless unlock. If the vault is uninitialized, unlock is skipped
     // and the Web UI drives first-run init.

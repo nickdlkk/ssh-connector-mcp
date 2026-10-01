@@ -983,8 +983,7 @@ function auditQuery(resetCursor = true) {
   ];
   for (const [key,value] of values) if (value) params.set(key, key === 'from' || key === 'to' ? new Date(value).toISOString() : value);
   const chosenMethods = selectedAuditMethods();
-  if (chosenMethods.length === 1) params.set('method', chosenMethods[0]);
-  else if (chosenMethods.length > 1) params.set('methods', chosenMethods.join(','));
+  for (const method of chosenMethods) params.append('methods', method);
   params.set('limit', el.auditPageSize().value || '100');
   params.set('sort_by', auditPaging.sortBy || 'ts_utc');
   params.set('order', auditPaging.order || 'desc');

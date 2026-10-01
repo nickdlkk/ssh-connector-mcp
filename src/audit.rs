@@ -472,6 +472,15 @@ mod tests {
     }
 
     #[test]
+    fn query_excludes_expired_rows_even_before_prune_runs() {
+        let (store, _) = temp_store();
+        let old = format_utc(time::OffsetDateTime::now_utc() - time::Duration::seconds(RETENTION_SECONDS + 3));
+        store.db.lock().unwrap().execute("INSERT INTO audit_events(ts_utc,method,source,status,input_json) VALUES(?1,'expired','test','success','{}')", [&old]).unwrap();
+        let (rows, _) = store.query(&AuditFilter { method:Some("expired".into()), ..Default::default() }).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
     fn try_record_fields_surfaces_audit_database_failure() {
         let (store, _) = temp_store();
         let db = store.db.lock().unwrap();

@@ -276,3 +276,25 @@ Nick明确反馈无需过度缜密，并允许最终替代生产。本计划已�
 - Nick反馈方法多选不应直接展开成常驻复选框列表，要求改回下拉多选。现增加“全部方法/已选 N 项”触发按钮；点击展开搜索、全选/清空和复选选项，点击外部或按 Escape 收起，支持 36 个预设项及既有自定义方法并集筛选。
 - 验证：`node --check static/app.js`、HTML parser、ID唯一性检查、`git diff --check`通过；`cargo test --locked web_audit_query_tests` 1 passed。真实浏览器截图/像素验收未执行。
 - 生产更新前备份 `index.html/app.js/style.css` 至 `/root/.hermes/profiles/ops/.ssh-connector/rollback-ui-method-dropdown-multiselect-2026-10-01/`；更新后生产HTTP三资源均200，响应字节与生产磁盘一致，页面返回包含下拉触发控件和36个方法项。服务仍active、版本0.1.2，未重启后端。
+
+
+### 2026-10-01 生产验收复查与修复续办
+
+- 复查发现之前将方法多选写成逗号分隔参数，与后端 `Option<Vec<String>>` 的重复 query 参数解析契约不一致；并且早先生产验证仅确认HTTP 200，没有核对返回条目是否严格属于所选方法，不能算功能验收通过。此项现在标记为**未验收/待修复**，不能以SQLite store 单测代替HTTP层验收。
+- 已在生产真实调用 MCP `host_list` 两次，SQLite 对应 `source=mcp, method=host_list` 事件增量正好2，MCP tools/list 返回28项；服务仍active、版本0.1.2。
+- 生产 SQLite `integrity_check=ok`、权限0600、27个源JSONL仍在；但直接SQL复核发现超过7天的旧行仍存在。源码目前在进程启动时清理且查询排除过期行，并无周期清理调度；阶段2原要求有启动及周期清理，需补上周期任务或明确调整计划，不能报告完全满足。
+- 本轮修复门禁：用隔离及生产API验证单选/多选 `methods` 只返回选中集合、包含重复 query 参数与自定义项、错误参数/超32项拒绝；验证每次 audit 查询自身的审计事件不会污染被返回结果；完成后再部署并读回生产API结果与服务状态。
+- 保留期门禁：为审计 store 增加定期清理（建议小时级）；提供可控测试证明任务运行后删除严格早于滚动7×24小时的记录、保留边界记录，并保证查询不返回过期数据；清理失败须可观测。验证生产旧过期行处理前先备份 SQLite/WAL 一致快照并记录删除计数。
+- Rust `cargo fmt --check` 与 `cargo clippy --all-targets --all-features -- -D warnings` 在当前环境因 cargo 子命令未安装而不能运行；报告为未执行，不视作通过。真实浏览器视觉验收仍待做。
+
+
+### 2026-10-01 多选过滤与周期清理修复完成
+
+- 根因：Axum `Query` 不能将重复键 `methods=a&methods=b` 直接反序列化为 `Option<Vec<String>>`，报错为 `invalid type: string "alpha", expected a sequence`。原失败 handler 产生审计事件，导致未按 method 筛选时的响应中不断出现新的 `GET audit`，先前只看 HTTP 200 而没验证结果成员，造成误判。
+- 修复：Web handler 用 `RawQuery` + `url::form_urlencoded` 逐项读取重复 `methods` 键；上限32项仍返回400；前端通过 `URLSearchParams.append` 按重复 query 参数提交所选方法。添加handler层集成测试验证并集只含所选项且不会带入 `GET audit` 事件，并测试超限拒绝。
+- 保留清理：启动时已有清理；新增每小时运行的 async prune task，失败通过 `tracing::error` 显式记录。`SSH_CONNECTOR_AUDIT_PRUNE_INTERVAL_SECS` 可用于运维/测试覆盖周期，缺失、无效或0则默认为3600秒。加入查询层过期行排除回归测试。
+- 隔离实际运行 candidate（17600端口，生产库一致快照的独立拷贝）：单选、多选MCP与Web筛选结果均只含选择方法；33项返回HTTP400。每秒清理的独立 systemd 隔离实例中，注入一条-8天事件后约1秒内日志 `expired audit rows deleted removed=1`，该行消失，数据库 integrity_check=ok；测试 unit 已停止。
+- 生产修改前备份目录 `/root/.hermes/profiles/ops/.ssh-connector/rollback-audit-fix-2026-10-01/`：旧0.1.2二进制、unit、config、env、audit/vault一致性SQLite备份。此前清理操作另有完整快照 `/root/.hermes/profiles/ops/.ssh-connector/audit/rollback-audit-cleanup-2026-10-01.sqlite3`，覆盖删除前2324行及591过期行，integrity_check=ok、权限0600。
+- 生产SQLite过期清理：备份后事务删除591条严格超过7天记录，剩余1733条，删除后 integrity_check=ok。期间服务未停止；候选0.1.2修复二进制部署并重启后，systemd为active，API状态0.1.2，SQLite integrity_check=ok、事件1743、过期行0。
+- 生产HTTP实测：`source=mcp&methods=host_list` 返回2条且仅 `host_list`；MCP多选返回所选集合；`source=web_api&methods=GET+status` 返回27条且仅 `GET status`；Web多选返回37条且仅 `GET hosts` / `GET status`；33项返回400。二进制与候选SHA256一致：`f667e9c2e3f2978f6efa3fb5ab20ae59725592155b788c1aa847706f90959167`。
+- 全量 `cargo test --offline` **62 passed**；release构建、`node --check static/app.js`、`git diff --check`通过。`cargo fmt`/clippy仍未安装。真实浏览器视觉验收仍未做。
