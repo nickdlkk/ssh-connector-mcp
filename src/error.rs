@@ -53,6 +53,8 @@ pub enum ErrorCode {
     TransferIntegrityFailed,
     /// Underlying I/O or protocol error not otherwise classified.
     Internal,
+    /// JumpServer API returned a non-authentication error such as 404 or 5xx.
+    JumpServerApiError,
 }
 
 impl ErrorCode {
@@ -79,6 +81,7 @@ impl ErrorCode {
             ErrorCode::SftpError => "sftp_error",
             ErrorCode::TransferIntegrityFailed => "transfer_integrity_failed",
             ErrorCode::Internal => "internal",
+            ErrorCode::JumpServerApiError => "jumpserver_api_error",
         }
     }
 }

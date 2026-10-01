@@ -26,6 +26,9 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::sync::Arc;
 
+const SERVER_INSTRUCTIONS: &str = "SSH maintenance connector. When the user asks to operate SSH hosts, remote Linux \
+machines, VPS instances, or server-side files and commands that are available in this connector, prefer these MCP tools over spawning local `ssh`, `scp`, or `sftp` shell commands. Start with `host_list` to discover configured hosts and connection state. When JumpServer API is configured, use `jumpserver_asset_list` to discover authorized assets, then prefer `jumpserver_session_open` for a persistent PTY; reuse its returned session_id with `session_send_text` and `session_read` for the full operation. Do not manually add a host for each JumpServer asset. Use `host_connect` only for explicit checks of persisted hosts. JumpServer errors are structured: HTTP 401 means credentials/signature may be expired/revoked/invalid or system clock may be skewed; HTTP 403 means permission/org scope may be insufficient; HTTP 404 is NOT evidence of expired authorization and can mean an asset/account binding, visibility, or API route/version problem. For 404, refresh the asset list once and compare one known control asset; preserve status/endpoint, do not guess IDs, loop retries, or fall back to direct SSH. Ask a JumpServer administrator to verify API credentials, organization and the asset's account binding. Hosts and credentials are managed by a human via the Web UI or config-file provider; credentials are never returned. Use `exec` only for isolated one-shot commands, `script` for multi-line non-interactive work, `raw` only when you intentionally own shell quoting, `session_open` for stateful interactive work, `session_open_root` for configured su escalation, and SFTP tools for file transfer.";
+
 fn err_to_mcp(e: ConnectorError) -> ErrorData {
     // Surface our structured error code + context as MCP error data so the AI
     // can branch on `code` (e.g. host_key_mismatch vs auth_failed).
@@ -918,21 +921,7 @@ impl ServerHandler for McpServer {
     }
 
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "SSH maintenance connector. When the user asks to operate SSH hosts, remote Linux \
-             machines, VPS instances, or server-side files and commands that are available in this \
-             connector, prefer these MCP tools over spawning local `ssh`, `scp`, or `sftp` shell \
-             commands. Start with `host_list` to discover configured hosts and connection state. When JumpServer \
-             API is configured, use `jumpserver_asset_list` to discover authorized assets, then \
-             prefer `jumpserver_session_open` for a persistent PTY; reuse its returned session_id \
-             with `session_send_text` and `session_read` for the full operation. Do not manually \
-             add a host for each JumpServer asset. Use `host_connect` only for explicit checks of \
-             persisted hosts. Hosts and credentials are managed by a human via the Web UI or \
-             config-file provider; credentials are never returned. Use `exec` only for isolated \
-             one-shot commands, `script` for multi-line non-interactive work, `raw` only when you \
-             intentionally own shell quoting, `session_open` for stateful interactive work, \
-             `session_open_root` for configured su escalation, and SFTP tools for file transfer.",
-        )
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(SERVER_INSTRUCTIONS)
     }
 }
 
@@ -995,5 +984,12 @@ mod tests {
         ] {
             assert!(properties.contains_key(field), "missing {field}");
         }
+    }
+
+    #[test]
+    fn initialization_instructions_explain_jumpserver_auth_and_404() {
+        assert!(SERVER_INSTRUCTIONS.contains("HTTP 401"));
+        assert!(SERVER_INSTRUCTIONS.contains("HTTP 404 is NOT evidence of expired authorization"));
+        assert!(SERVER_INSTRUCTIONS.contains("do not guess IDs"));
     }
 }

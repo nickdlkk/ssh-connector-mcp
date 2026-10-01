@@ -145,10 +145,15 @@ impl JumpServerClient {
         })?;
         let status = resp.status();
         if !status.is_success() {
-            return Err(ConnectorError::new(
-                ErrorCode::AuthFailed,
-                format!("JumpServer API returned HTTP {status}"),
-            ));
+            let status_code = status.as_u16();
+            let message = match status_code {
+                401 => "JumpServer API returned HTTP 401 Unauthorized. The API access key/signature may be expired, revoked, clock-skewed, or invalid. Ask an administrator to verify/renew the configured JumpServer API credentials and system time; do not retry the same request or try alternate credentials.".to_string(),
+                403 => "JumpServer API returned HTTP 403 Forbidden. The API credential was recognized but may lack permission for this operation/asset, or the requested organization is not accessible. Ask a JumpServer administrator to verify organization and least-privilege API permissions.".to_string(),
+                404 => format!("JumpServer API returned HTTP 404 Not Found for endpoint `{}`. This is not proof that authentication expired: it can indicate an inaccessible/missing asset or account binding, wrong API route/version, or object-scoped visibility. Re-discover the asset once and compare a known control asset; do not invent IDs or fall back to a direct connection.", parsed.path()),
+                _ => format!("JumpServer API returned HTTP {status} for endpoint `{}`.", parsed.path()),
+            };
+            let code = if status_code == 401 || status_code == 403 { ErrorCode::AuthFailed } else { ErrorCode::JumpServerApiError };
+            return Err(ConnectorError::new(code, message).with_context(serde_json::json!({"http_status":status_code,"endpoint":parsed.path()})));
         }
         resp.json::<T>()
             .await
@@ -183,3 +188,54 @@ impl JumpServerClient {
 }
 
 pub type SharedJumpServer = Arc<JumpServerClient>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn mock_response(status: u16, body: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 8192];
+            let _ = stream.read(&mut request).await.unwrap();
+            let reason = if status == 401 { "Unauthorized" } else if status == 403 { "Forbidden" } else if status == 404 { "Not Found" } else { "Internal Server Error" };
+            let response = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{address}")
+    }
+
+    fn client(base: String) -> JumpServerClient {
+        JumpServerClient::new(JumpServerConfig { api_url:base, org_id:"org".into(), api_access_key_env:"TEST_AK".into(), api_secret_key_env:"TEST_SK".into(), ssh_username:"u".into(), ssh_password_host_id:"h".into(), koko_host:"koko".into(), koko_port:2222, verify_tls:false }).unwrap()
+    }
+
+    #[tokio::test]
+    async fn classifies_jumpserver_expired_auth_and_account_404_separately() {
+        // SAFETY: these test-only variables are unique to this test and are not
+        // read or modified by any other test or production task.
+        unsafe {
+            std::env::set_var("TEST_AK", "ak");
+            std::env::set_var("TEST_SK", "sk");
+        }
+        let unauthorized=client(mock_response(401,"{}").await).get::<serde_json::Value>("/api/v1/assets/hosts/").await.unwrap_err();
+        assert_eq!(unauthorized.code, ErrorCode::AuthFailed);
+        assert!(unauthorized.message.contains("expired"));
+        assert_eq!(unauthorized.context.as_ref().unwrap()["http_status"],401);
+
+        let forbidden=client(mock_response(403,"{}").await).get::<serde_json::Value>("/api/v1/assets/hosts/").await.unwrap_err();
+        assert_eq!(forbidden.code, ErrorCode::AuthFailed);
+        assert!(forbidden.message.contains("permission"));
+
+        let missing=client(mock_response(404,"{}").await).get::<serde_json::Value>("/api/v1/assets/hosts/nas/").await.unwrap_err();
+        assert_eq!(missing.code, ErrorCode::JumpServerApiError);
+        assert!(missing.message.contains("not proof that authentication expired"));
+        assert_eq!(missing.context.as_ref().unwrap()["endpoint"],"/api/v1/assets/hosts/nas/");
+        unsafe {
+            std::env::remove_var("TEST_AK");
+            std::env::remove_var("TEST_SK");
+        }
+    }
+}

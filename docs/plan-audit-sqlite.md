@@ -311,3 +311,12 @@ Nick明确反馈无需过度缜密，并允许最终替代生产。本计划已�
 
 - 浏览器实测发现触发器默认状态正确，但用户勾选方法后计数/按钮文本没有即时变化；已添加复选框 `change` 监听，并在视图初始化时同步触发器文案。二次 Playwright 实测复选后立即显示“已选 1 项”，筛选结果仅2条 `host_list`，搜索、Escape、重置、无横向溢出及无浏览器错误均通过。
 - 生产静态资源已按上条记录备份、更新并HTTP读回验证。本次修复及执行记录已提交推送：`eb8f3ab fix(ui): update selected audit method count`；远端 `origin/main` 与本地 HEAD 一致，工作区干净。
+
+
+### 2026-10-01 JumpServer 授权过期提示给 Agent
+
+- Nick提出 API 授权过期时是否有明确提示，并要求提示 Agent。核查后原实现将所有非 2xx 状态（含404）一律映射为 `auth_failed`、message `JumpServer API returned HTTP ...`，确实容易把 NAS 资产/账号 404误判成认证过期。
+- 修复：HTTP 401 明确提示凭据/签名可能过期、撤销、无效或时钟偏差；403提示权限/组织范围；404使用新 `jumpserver_api_error` 结构化错误，附 `http_status` 和 endpoint，并明确“404不证明授权过期”，建议仅刷新资产并对照一次已知 control asset，禁止猜ID、循环重试或直连绕过。相同诊断规则同时加入 MCP initialize instructions，Agent 启动即能读到。
+- 新增本地 mock HTTP 测试覆盖401、403和404分类及上下文；全量 `cargo test --offline` 64 passed，release build与 `git diff --check`通过。
+- 生产部署前备份旧二进制、unit、config/env 与 audit/vault SQLite一致性备份至 `/root/.hermes/profiles/ops/.ssh-connector/rollback-jumpserver-auth-guidance-2026-10-01/`。新release部署后服务 `active`、版本仍0.1.2，运行二进制SHA256与candidate均为 `df3ae3ecc6f319b8bfbb50e92f62c19f7a316fdde74702d8e100ea78754b9cbd`。
+- 生产 `/mcp` initialize 实测返回 instructions，包含HTTP401、404不是授权过期、禁止猜ID等提示；生产 `/api/status` 正常。尚未通过生产JumpServer凭据触发实际401/404（不故意破坏密钥或更改资产）；错误分类由本地mock测试覆盖。

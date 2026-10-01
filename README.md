@@ -38,6 +38,7 @@ SSH Connector MCP separates these responsibilities:
 - **Destination-safe file commits**: optional parent creation, no-clobber by default, same-directory temporary files, overwrite rollback, failure cleanup, size checks, and local/server-side SHA-256 verification.
 - **Connection lifecycle**: SSH transports are pooled and reused; one-shot operations connect on demand; removing a host drops its live connection.
 - **Jump hosts and multiple auth modes**: password, private key with optional passphrase, keyboard-interactive, and per-hop jump chains.
+- **JumpServer diagnostic hints**: API 401/403/404 failures are distinguished; a 404 is not reported as expired authorization and carries endpoint/status context for the AI.
 - **Audit log**: local SQLite (`audit.sqlite3`) with a rolling seven-day UTC retention window, legacy JSONL import, query filters/sorting/cursors, and bounded redaction policy; WebSocket frame bodies are excluded. See [`docs/audit-sqlite.md`](docs/audit-sqlite.md).
 - **Rolling cleanup and method multi-select**: expired rows are pruned at startup and hourly (interval override: `SSH_CONNECTOR_AUDIT_PRUNE_INTERVAL_SECS`). `GET /api/audit` accepts repeated `methods` query parameters; any selected method matches.
 - **MacBook-friendly idle profile**: idle daemon is lightweight; no sleep-preventing power assertion.
