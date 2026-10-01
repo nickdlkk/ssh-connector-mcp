@@ -298,3 +298,10 @@ Nick明确反馈无需过度缜密，并允许最终替代生产。本计划已�
 - 生产SQLite过期清理：备份后事务删除591条严格超过7天记录，剩余1733条，删除后 integrity_check=ok。期间服务未停止；候选0.1.2修复二进制部署并重启后，systemd为active，API状态0.1.2，SQLite integrity_check=ok、事件1743、过期行0。
 - 生产HTTP实测：`source=mcp&methods=host_list` 返回2条且仅 `host_list`；MCP多选返回所选集合；`source=web_api&methods=GET+status` 返回27条且仅 `GET status`；Web多选返回37条且仅 `GET hosts` / `GET status`；33项返回400。二进制与候选SHA256一致：`f667e9c2e3f2978f6efa3fb5ab20ae59725592155b788c1aa847706f90959167`。
 - 全量 `cargo test --offline` **62 passed**；release构建、`node --check static/app.js`、`git diff --check`通过。`cargo fmt`/clippy仍未安装。真实浏览器视觉验收仍未做。
+
+
+### 2026-10-01 真实 Chromium 浏览器验收
+
+- 使用本机 Chromium 152 + Playwright Core，对生产静态资源的独立隔离副本（单独临时 data dir/17603，拷贝生产数据库一致快照，未触碰生产凭据）进行 headless 真浏览器交互验收。审计页渲染36个预设方法项；方法下拉默认收起，点击展开搜索、全选/清空及复选项，选择 `host_list` 后触发器与已选计数均显示“已选 1 项”，Apply 后结果仅2条 `host_list`，查询无误带入 `GET audit`。搜索“exec”仅显示3个匹配项；Escape收起下拉；重置后触发器恢复“全部方法”。
+- 浏览器无 console/page errors，页面没有横向溢出（1440px viewport：scrollWidth=clientWidth=1440）。截图：`/tmp/audit-browser-verified.png`。此轮同时发现并修正此前选择复选框后触发器/计数未实时更新的问题；加入 checkbox change 监听及初始化时同步按钮文案。
+- 修正版静态资源更新前备份到 `/root/.hermes/profiles/ops/.ssh-connector/rollback-ui-audit-browser-verified-2026-10-01/`。生产HTTP回读 index/app.js/style.css/favicon.svg 全部200，响应与生产磁盘字节完全一致；服务保持active，后端未重启。

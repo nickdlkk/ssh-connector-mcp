@@ -1279,7 +1279,9 @@ function attachEventListeners() {
   ];
   const selected = selectedAuditMethods();
   el.auditMethodCount().textContent = selected.length ? `已选 ${selected.length} 项` : '未选';
+  el.auditMethodTrigger().textContent = selected.length ? `已选 ${selected.length} 项` : '全部方法';
   values.forEach(box => { box.checked = selected.includes(box.value); });
+  values.forEach(box => box.addEventListener('change', updateAuditMethodCount));
   el.auditMethodSearch().addEventListener('input',filterAuditMethodOptions);
   el.auditMethodSelectAll().addEventListener('click',()=>{el.auditMethodOptions().querySelectorAll('.audit-method-option:not(.hidden) input').forEach(box=>{box.checked=true;});updateAuditMethodCount();});
   el.auditMethodClear().addEventListener('click',()=>{el.auditMethodOptions().querySelectorAll('input[type="checkbox"]').forEach(box=>{box.checked=false;});updateAuditMethodCount();});
