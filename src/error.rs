@@ -55,6 +55,10 @@ pub enum ErrorCode {
     Internal,
     /// JumpServer API returned a non-authentication error such as 404 or 5xx.
     JumpServerApiError,
+    /// Direct one-shot exec is forbidden for JumpServer-managed targets.
+    JumpServerExecDenied,
+    /// Ordinary host connection, PTY, host editing, or SFTP is forbidden for JumpServer targets.
+    JumpServerSessionRequired,
 }
 
 impl ErrorCode {
@@ -82,6 +86,8 @@ impl ErrorCode {
             ErrorCode::TransferIntegrityFailed => "transfer_integrity_failed",
             ErrorCode::Internal => "internal",
             ErrorCode::JumpServerApiError => "jumpserver_api_error",
+            ErrorCode::JumpServerExecDenied => "jumpserver_exec_denied",
+            ErrorCode::JumpServerSessionRequired => "jumpserver_session_required",
         }
     }
 }

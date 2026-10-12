@@ -27,12 +27,27 @@ use serde_json::{Map, Value};
 use std::sync::Arc;
 
 const SERVER_INSTRUCTIONS: &str = "SSH maintenance connector. When the user asks to operate SSH hosts, remote Linux \
-machines, VPS instances, or server-side files and commands that are available in this connector, prefer these MCP tools over spawning local `ssh`, `scp`, or `sftp` shell commands. Start with `host_list` to discover configured hosts and connection state. When JumpServer API is configured, use `jumpserver_asset_list` to discover authorized assets, then prefer `jumpserver_session_open` for a persistent PTY; reuse its returned session_id with `session_send_text` and `session_read` for the full operation. Do not manually add a host for each JumpServer asset. Use `host_connect` only for explicit checks of persisted hosts. JumpServer errors are structured: HTTP 401 means credentials/signature may be expired/revoked/invalid or system clock may be skewed; HTTP 403 means permission/org scope may be insufficient; HTTP 404 is NOT evidence of expired authorization and can mean an asset/account binding, visibility, or API route/version problem. For 404, refresh the asset list once and compare one known control asset; preserve status/endpoint, do not guess IDs, loop retries, or fall back to direct SSH. Ask a JumpServer administrator to verify API credentials, organization and the asset's account binding. Hosts and credentials are managed by a human via the Web UI or config-file provider; credentials are never returned. Use `exec` only for isolated one-shot commands, `script` for multi-line non-interactive work, `raw` only when you intentionally own shell quoting, `session_open` for stateful interactive work, `session_open_root` for configured su escalation, and SFTP tools for file transfer.";
+machines, VPS instances, or server-side files and commands that are available in this connector, prefer these MCP tools over spawning local `ssh`, `scp`, or `sftp` shell commands. Start with `host_list` to discover configured hosts and connection state. When JumpServer API is configured, use `jumpserver_asset_list` to discover authorized assets, then call `jumpserver_session_open` once for a persistent PTY and reuse its session_id for the full operation. Direct `exec`, ordinary `host_connect`, `session_open`/`session_open_root`, and SFTP operations are forbidden for recognized JumpServer-managed targets before network or file-transfer side effects; policy errors carry stable business codes. Do not manually add a host for each JumpServer asset or use a direct connection as a fallback. Use `host_connect` only for explicit checks of persisted hosts. JumpServer errors are structured: HTTP 401 means credentials/signature may be expired/revoked/invalid or system clock may be skewed; HTTP 403 means permission/org scope may be insufficient; HTTP 404 is NOT evidence of expired authorization and can mean an asset/account binding, visibility, or API route/version problem. For 404, refresh the asset list once and compare one known control asset; preserve status/endpoint, do not guess IDs, loop retries, or fall back to direct SSH. Ask a JumpServer administrator to verify API credentials, organization and the asset's account binding. Hosts and credentials are managed by a human via the Web UI or config-file provider; credentials are never returned. Use `exec` only for isolated one-shot commands on ordinary SSH hosts, `script` for multi-line non-interactive work on ordinary SSH hosts, `raw` only when you intentionally own shell quoting, `session_open` for stateful work on ordinary hosts, `session_open_root` for configured su escalation on ordinary hosts, and SFTP tools for file transfer.";
 
 fn err_to_mcp(e: ConnectorError) -> ErrorData {
     // Surface our structured error code + context as MCP error data so the AI
     // can branch on `code` (e.g. host_key_mismatch vs auth_failed).
-    let data = serde_json::to_value(&e).ok();
+    let stable_code = e.code.as_str();
+    let mut data = serde_json::to_value(&e).ok();
+    if let Some(object) = data.as_mut().and_then(Value::as_object_mut) {
+        object.insert("code".into(), Value::String(stable_code.into()));
+    }
+    if matches!(
+        e.code,
+        crate::error::ErrorCode::JumpServerExecDenied
+            | crate::error::ErrorCode::JumpServerSessionRequired
+    ) {
+        return ErrorData::new(
+            rmcp::model::ErrorCode::INVALID_PARAMS,
+            e.message.clone(),
+            data,
+        );
+    }
     ErrorData::internal_error(e.message.clone(), data)
 }
 
@@ -553,7 +568,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Run a one-shot command and wait for it to finish. Choose exactly one payload: `argv` (array, auto-quoted — preferred), `script` (multi-line, uploaded and run as a file), or `raw` (you own all quoting). Returns stdout/stderr/exit_code with truncation and timeout flags."
+        description = "Run a one-shot command and wait for it to finish on ordinary SSH hosts. Direct exec is forbidden for JumpServer-managed targets and returns jumpserver_exec_denied; use jumpserver_session_open and reuse its session_id with session tools instead. Choose exactly one payload: argv (array, auto-quoted), script (multi-line), or raw (caller owns quoting). Returns stdout/stderr/exit_code with truncation and timeout flags."
     )]
     async fn exec(
         &self,
@@ -583,7 +598,7 @@ impl McpServer {
         Ok(Json(JumpServerAccountListResult { accounts }))
     }
 
-    #[tool(description = "Open a persistent PTY through JumpServer for an API-discovered asset/account. Prefer this over host_add and session_open for JumpServer-managed assets; reuse the returned session_id with session_send_text and session_read.")]
+    #[tool(description = "Open a persistent PTY through JumpServer for an API-discovered asset/account. This is the supported way to access JumpServer-managed assets; direct exec and ordinary host connection/PTY/SFTP paths are rejected. Reuse the returned session_id with session tools; do not open a new session for each command.")]
     async fn jumpserver_session_open(
         &self,
         Parameters(req): Parameters<JumpServerSessionOpenRequest>,
@@ -593,7 +608,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Open a persistent interactive PTY session (stateful shell) on a host. Returns session metadata including session_id."
+        description = "Open a persistent interactive PTY session (stateful shell) on an ordinary SSH host. For JumpServer-managed assets, use jumpserver_session_open; this tool is rejected for recognized JumpServer targets. Returns session metadata including session_id."
     )]
     async fn session_open(
         &self,
@@ -908,7 +923,7 @@ impl ServerHandler for McpServer {
                     Ok(output)
                 }
                 Err(error) => {
-                    let code = format!("{:?}", error.code);
+                    let code = error.data.as_ref().and_then(|data| data.get("code")).and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| error.code.0.to_string());
                     let audit_result = self.state.audit.try_record_fields(crate::audit::AuditLog::entry(&method), "mcp", input_copy, Some(serde_json::json!({"error_code":code})), Some(elapsed), None, None, Some(&code));
                     if let Err(audit_error) = audit_result {
                         tracing::error!(target:"audit",method=%method,"mandatory MCP audit failed for error response: {audit_error}");
@@ -991,5 +1006,33 @@ mod tests {
         assert!(SERVER_INSTRUCTIONS.contains("HTTP 401"));
         assert!(SERVER_INSTRUCTIONS.contains("HTTP 404 is NOT evidence of expired authorization"));
         assert!(SERVER_INSTRUCTIONS.contains("do not guess IDs"));
+    }
+
+    #[test]
+    fn jumpserver_policy_error_keeps_stable_business_code_in_mcp_data() {
+        for code in [
+            crate::error::ErrorCode::JumpServerExecDenied,
+            crate::error::ErrorCode::JumpServerSessionRequired,
+        ] {
+            let error = err_to_mcp(ConnectorError::new(code, "blocked"));
+            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            assert_eq!(
+                error.data.as_ref().and_then(|value| value.get("code")).and_then(Value::as_str),
+                Some(code.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn jumpserver_descriptions_state_exec_policy_and_pty_reuse() {
+        assert!(SERVER_INSTRUCTIONS.contains("Direct `exec`"));
+        assert!(SERVER_INSTRUCTIONS.contains("jumpserver_session_open` once"));
+        let router = McpServer::tool_router();
+        let exec = router.get("exec").unwrap().description.as_deref().unwrap_or_default();
+        assert!(exec.contains("forbidden for JumpServer-managed targets"));
+        assert!(exec.contains("jumpserver_session_open"));
+        let open = router.get("jumpserver_session_open").unwrap().description.as_deref().unwrap_or_default().to_ascii_lowercase();
+        assert!(open.contains("reuse the returned session_id"));
+        assert!(open.contains("do not open a new session"));
     }
 }

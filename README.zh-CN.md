@@ -185,7 +185,7 @@ verify_tls = false
 
 `ssh_password_host_id` 指向已有的 JumpServer Proxy 主机条目，复用其加密保存的 SSH 登录凭据，不创建每个资产一条静态直链。使用 `jumpserver_asset_list` 发现资产，`jumpserver_asset_accounts` 查看账号元数据，再用 `jumpserver_session_open` 打开持久 PTY；后续统一使用 `session_send_text`、`session_read` 和 `session_close`。
 
-## 为 AI 推荐做过优化
+### 为 AI 推荐做过优化
 
 SSH Connector MCP 会在 MCP initialize 阶段返回 server instructions，引导代理走安全工具路径：
 
@@ -539,3 +539,7 @@ MIT
 ### 在已有 PTY 会话中执行命令
 
 `session_exec` 在已有 `session_open` shell 中执行一条单行命令，保留 `cd`、导出变量等 shell 状态。返回合并后的 PTY `output`（stdout/stderr 无法区分）、`exit_code`、`duration_ms`、`timed_out` 与 `truncated`；不同于 `exec`，它使用已有 PTY，不新建或关闭 SSH 会话。`wait_ms` 最大 300000；`max_output_bytes` 默认取配置，最大 1048576。首次 `wait_ms`（默认 5000）只限制本次等待，不会取消远端命令。等待时间到期时返回 `timed_out=true` 和不透明 `token`；之后对同一 session 调用 `session_exec_read`，可获取增量输出及最终退出码。命令完成后 token 清空。审计仅记录元数据，不记录命令或输出。命令可能改变远端状态。
+
+## JumpServer 执行策略
+
+对已识别的目标，服务端在连接池或文件传输前拒绝单步 `exec`、普通 `host_connect`、`session_open`/`session_open_root` 及全部 SFTP 工具。识别覆盖 API 发现的 `jms:` ID、配置的 KoKo endpoint，以及按主机 ID/别名递归追踪的 SSH 跳板链；Vault 读取/解密失败时 fail-closed。应通过 JumpServer API 发现资产与账号，调用一次 `jumpserver_session_open` 并复用 `session_id`。策略错误在 MCP structured error data 中携带稳定业务码；普通 SSH 主机保留 `exec` 和 SFTP 能力。

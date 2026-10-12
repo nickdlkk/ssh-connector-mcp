@@ -379,6 +379,10 @@ Result shape:
 }
 ```
 
+## JumpServer execution policy
+
+For recognized JumpServer-managed targets, the daemon rejects one-shot `exec`, ordinary host connection/PTY tools, and all SFTP tools before the connection pool or file-transfer path is reached. Target detection covers API-discovered `jms:` IDs, the configured KoKo endpoint, and recursive SSH jump chains resolved by host ID or alias; Vault read/decryption errors fail closed. Discover assets/accounts through the JumpServer API, open one `jumpserver_session_open` PTY, and reuse its `session_id` with session tools. Policy errors include a stable business code in MCP structured error data. Ordinary SSH hosts retain normal `exec` and SFTP behavior.
+
 ## SFTP Payloads
 
 Use `sftp_get` / `sftp_put` only for UTF-8 text.
