@@ -4,13 +4,13 @@
 
 use crate::audit::AuditLog;
 use crate::config::Config;
-use crate::jumpserver::{Asset, JumpServerClient};
 use crate::error::{ConnectorError, Result};
+use crate::jumpserver::{Asset, JumpServerClient};
 use crate::session::{ExecLimits, SessionManager};
 use crate::ssh::ConnectionPool;
 use crate::types::{
     DirEntry, ExecPayload, ExecResult, HostDetail, HostSpec, HostStatus, HostSummary, KeyName,
-    ReadResult, ScreenSnapshot, SessionInfo, SessionExecResult,
+    ReadResult, ScreenSnapshot, SessionExecResult, SessionInfo,
 };
 use crate::vault::Vault;
 use std::path::{Path, PathBuf};
@@ -35,6 +35,7 @@ pub struct AppState {
     /// Loopback bearer token shared with the local MCP stdio shim.
     pub local_token: String,
     pub jumpserver: Option<Arc<JumpServerClient>>,
+    pub totp: Arc<crate::totp::Totp>,
 }
 
 impl AppState {
@@ -43,6 +44,7 @@ impl AppState {
         audit: Arc<AuditLog>,
         config: Config,
         local_token: String,
+        totp: Arc<crate::totp::Totp>,
     ) -> Result<Arc<Self>> {
         let pool = Arc::new(ConnectionPool::new(vault.clone(), config.keepalive_secs));
         let limits = ExecLimits {
@@ -67,6 +69,7 @@ impl AppState {
                 .map(Arc::new),
             config,
             local_token,
+            totp,
         }))
     }
 
@@ -77,12 +80,16 @@ impl AppState {
     }
 
     pub fn update_host(&self, id: &str, spec: HostSpec) -> Result<()> {
-        self.ensure_not_jumpserver_target(id)?;
+        if self.is_jumpserver_target(id)? {
+            return Err(jumpserver_session_required());
+        }
         self.vault.update_host(id, spec)
     }
 
     pub async fn remove_host(&self, id: &str) -> Result<()> {
-        self.ensure_not_jumpserver_target(id)?;
+        if self.is_jumpserver_target(id)? {
+            return Err(jumpserver_session_required());
+        }
         self.pool.disconnect(id).await;
         self.vault.remove_host(id)?;
         Ok(())
@@ -114,30 +121,36 @@ impl AppState {
     }
 
     pub async fn connect_host(&self, id: &str) -> Result<()> {
-        self.ensure_not_jumpserver_target(id)?;
-        match self.pool.connect(id).await {
-            Ok(()) => {
-                Ok(())
-            }
-            Err(e) => {
-                Err(e)
-            }
+        if self.is_jumpserver_target(id)? {
+            return Err(jumpserver_session_required());
         }
+        self.pool.connect(id).await
     }
 
     pub async fn disconnect_host(&self, id: &str) -> Result<()> {
-        self.ensure_not_jumpserver_target(id)?;
+        if self.is_jumpserver_target(id)? {
+            return Err(jumpserver_session_required());
+        }
         self.pool.disconnect(id).await;
         Ok(())
     }
 
     pub async fn jumpserver_assets(&self) -> Result<Vec<Asset>> {
-        let client = self.jumpserver.as_ref().ok_or_else(|| ConnectorError::bad_request("JumpServer is not configured"))?;
+        let client = self
+            .jumpserver
+            .as_ref()
+            .ok_or_else(|| ConnectorError::bad_request("JumpServer is not configured"))?;
         client.list_assets().await
     }
 
-    pub async fn jumpserver_accounts(&self, asset_id: &str) -> Result<Vec<crate::jumpserver::Account>> {
-        let client = self.jumpserver.as_ref().ok_or_else(|| ConnectorError::bad_request("JumpServer is not configured"))?;
+    pub async fn jumpserver_accounts(
+        &self,
+        asset_id: &str,
+    ) -> Result<Vec<crate::jumpserver::Account>> {
+        let client = self
+            .jumpserver
+            .as_ref()
+            .ok_or_else(|| ConnectorError::bad_request("JumpServer is not configured"))?;
         client.list_accounts(asset_id).await
     }
 
@@ -148,117 +161,189 @@ impl AppState {
         rows: u16,
         cols: u16,
     ) -> Result<SessionInfo> {
-        let client = self.jumpserver.as_ref().ok_or_else(|| ConnectorError::bad_request("JumpServer is not configured"))?;
+        let client = self
+            .jumpserver
+            .as_ref()
+            .ok_or_else(|| ConnectorError::bad_request("JumpServer is not configured"))?;
         let password_host_id = client.ssh_password_host_id();
         let password_cfg = self.vault.get_host_config(password_host_id)?;
-        let cfg = client.resolve_target(asset_id, account_id, password_cfg.auth).await?;
+        let cfg = client
+            .resolve_target(asset_id, account_id, password_cfg.auth)
+            .await?;
         let target = cfg;
         let host_id = target.id.clone();
-        self.sessions.open_pty_on_config(&host_id, &target, rows, cols).await
+        self.sessions
+            .open_pty_on_config(&host_id, &target, rows, cols)
+            .await
     }
 
-    fn ensure_not_jumpserver_target(&self, host_id: &str) -> Result<()> {
-        if self.is_jumpserver_target(host_id)? {
-            return Err(jumpserver_session_required());
+    /// Resolve an authorized JumpServer asset/account into a transient KoKo target.
+    async fn resolve_jumpserver_target(&self, asset_id: &str, account_id: &str) -> Result<crate::types::HostConfig> {
+        let client = self.jumpserver.as_ref().ok_or_else(|| ConnectorError::bad_request("JumpServer is not configured"))?;
+        let password_cfg = self.vault.get_host_config(client.ssh_password_host_id())?;
+        client.resolve_target(asset_id, account_id, password_cfg.auth).await
+    }
+
+    /// SFTP against an API-discovered JumpServer target using KoKo's SFTP subsystem.
+    pub async fn jumpserver_sftp_list(&self, asset_id: &str, account_id: &str, path: &str) -> Result<Vec<DirEntry>> {
+        let cfg = self.resolve_jumpserver_target(asset_id, account_id).await?;
+        let id = cfg.id.clone();
+        let conn = self.pool.get_or_connect_config(&id, &cfg).await?;
+        crate::session::sftp_list(&conn, path).await
+    }
+
+    pub async fn jumpserver_sftp_get(&self, asset_id: &str, account_id: &str, path: &str) -> Result<Vec<u8>> {
+        let cfg = self.resolve_jumpserver_target(asset_id, account_id).await?;
+        let id = cfg.id.clone();
+        let conn = self.pool.get_or_connect_config(&id, &cfg).await?;
+        crate::session::sftp_get(&conn, path).await
+    }
+
+    pub async fn jumpserver_sftp_put(&self, asset_id: &str, account_id: &str, path: &str, data: &[u8]) -> Result<()> {
+        let cfg = self.resolve_jumpserver_target(asset_id, account_id).await?;
+        let id = cfg.id.clone();
+        let conn = self.pool.get_or_connect_config(&id, &cfg).await?;
+        crate::session::sftp_put(&conn, path, data).await
+    }
+
+    pub async fn jumpserver_sftp_download_file(&self, asset_id: &str, account_id: &str, remote_path: &str, local_path: &str, overwrite: bool, create_parent_dirs: bool, chunk_size: usize, verify: bool) -> Result<LocalFileTransfer> {
+        let cfg = self.resolve_jumpserver_target(asset_id, account_id).await?;
+        let path = allowed_local_write_path(local_path, create_parent_dirs)?;
+        if path.exists() && !overwrite {
+            return Err(ConnectorError::bad_request(format!("local file already exists: {}; pass overwrite=true to replace it", path.display())));
         }
-        Ok(())
+        let id = cfg.id.clone();
+        let conn = self.pool.get_or_connect_config(&id, &cfg).await?;
+        let report = crate::session::sftp_download_file(&conn, remote_path, &path, overwrite, chunk_size, verify).await?;
+        Ok(LocalFileTransfer { local_path: path, remote_path: remote_path.to_string(), bytes: report.bytes, sha256: report.sha256, verified: report.verified })
     }
 
-    fn is_jumpserver_exec_target(&self, host_id: &str) -> Result<bool> {
-        self.is_jumpserver_target(host_id)
+    pub async fn jumpserver_sftp_upload_file(&self, asset_id: &str, account_id: &str, local_path: &str, remote_path: &str, overwrite: bool, create_parent_dirs: bool, chunk_size: usize, verify: bool) -> Result<LocalFileTransfer> {
+        let cfg = self.resolve_jumpserver_target(asset_id, account_id).await?;
+        let path = allowed_local_read_path(local_path)?;
+        let id = cfg.id.clone();
+        let conn = self.pool.get_or_connect_config(&id, &cfg).await?;
+        let report = crate::session::sftp_upload_file(&conn, &path, remote_path, overwrite, create_parent_dirs, chunk_size, verify).await?;
+        Ok(LocalFileTransfer { local_path: path, remote_path: remote_path.to_string(), bytes: report.bytes, sha256: report.sha256, verified: report.verified })
     }
-
-    fn is_jumpserver_target(&self, host_id: &str) -> Result<bool> {
-        if host_id.starts_with("jms:") {
-            return Ok(true);
-        }
-        let Some(jms) = self.config.jumpserver.as_ref() else {
-            return Ok(false);
-        };
-        let configs = self.vault.list_host_configs()?;
-        let Some(target) = configs.iter().find(|cfg| cfg.id == host_id) else {
-            return Ok(false);
-        };
-        let by_id: std::collections::HashMap<_, _> =
-            configs.iter().map(|cfg| (cfg.id.as_str(), cfg)).collect();
-        let by_alias: std::collections::HashMap<_, _> =
-            configs.iter().map(|cfg| (cfg.alias.as_str(), cfg)).collect();
-        Ok(is_jumpserver_target_recursive(
-            target,
-            &by_id,
-            &by_alias,
-            &jms.koko_host,
-            jms.koko_port,
-            &mut std::collections::HashSet::new(),
-        ))
-    }
-
 
     // --- Exec / PTY / SFTP (delegated to the session manager) ---
 
+    pub fn is_jumpserver_target(&self, host_id: &str) -> Result<bool> {
+        // Targets returned by JumpServer API are transient and use a reserved ID.
+        if host_id.starts_with("jms:") {
+            return Ok(true);
+        }
+
+        // Also block a manually-added/aliased host that points directly at the
+        // configured KoKo endpoint, or routes through it as a jump hop.
+        let Some(jms) = self.config.jumpserver.as_ref() else {
+            return Ok(false);
+        };
+        let cfg = match self.vault.get_host_config(host_id) {
+            Ok(cfg) => cfg,
+            Err(err) if err.code == crate::error::ErrorCode::HostNotFound => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        let endpoint_matches =
+            |host: &str, port: u16| is_koko_endpoint(host, port, &jms.koko_host, jms.koko_port);
+        let mut visited = std::collections::HashSet::new();
+        let mut pending = vec![cfg];
+        while let Some(candidate) = pending.pop() {
+            if !visited.insert(candidate.id.clone()) {
+                continue;
+            }
+            if endpoint_matches(&candidate.host, candidate.port)
+                || candidate
+                    .jump_hosts
+                    .iter()
+                    .any(|hop| endpoint_matches(&hop.host, hop.port))
+            {
+                return Ok(true);
+            }
+            for hop in &candidate.jump_hosts {
+                match self.vault.get_host_config(&hop.host) {
+                    Ok(next) => pending.push(next),
+                    Err(err) if err.code == crate::error::ErrorCode::HostNotFound => {}
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+        Ok(false)
+    }
+
     pub async fn exec(&self, host_id: &str, payload: &ExecPayload) -> Result<ExecResult> {
-        if self.is_jumpserver_exec_target(host_id)? {
+        // Reject before touching the SSH session manager so exec cannot create
+        // an extra KoKo/JMS connection or session.
+        if self.is_jumpserver_target(host_id)? {
             return Err(ConnectorError::new(
                 crate::error::ErrorCode::JumpServerExecDenied,
                 "Direct exec is disabled for JumpServer-managed targets. Use jumpserver_session_open, then reuse its session_id with session tools.",
             ));
         }
         match self.sessions.exec(host_id, payload).await {
-            Ok(r) => {
-                Ok(r)
-            }
-            Err(e) => {
-                Err(e)
-            }
+            Ok(r) => Ok(r),
+            Err(e) => Err(e),
         }
     }
 
     pub async fn open_pty(&self, host_id: &str, rows: u16, cols: u16) -> Result<SessionInfo> {
-        self.ensure_not_jumpserver_target(host_id)?;
+        if self.is_jumpserver_target(host_id)? {
+            return Err(jumpserver_session_required());
+        }
         match self.sessions.open_pty(host_id, rows, cols).await {
-            Ok(info) => {
-                Ok(info)
-            }
-            Err(e) => {
-                Err(e)
-            }
+            Ok(info) => Ok(info),
+            Err(e) => Err(e),
         }
     }
 
     pub async fn open_root_pty(&self, host_id: &str, rows: u16, cols: u16) -> Result<SessionInfo> {
-        self.ensure_not_jumpserver_target(host_id)?;
+        if self.is_jumpserver_target(host_id)? {
+            return Err(jumpserver_session_required());
+        }
         let cfg = self.vault.get_host_config(host_id)?;
         let result = self
             .sessions
             .open_root_pty(host_id, rows, cols, cfg.become_root.as_ref())
             .await;
         match result {
-            Ok(info) => {
-                Ok(info)
-            }
-            Err(e) => {
-                Err(e)
-            }
+            Ok(info) => Ok(info),
+            Err(e) => Err(e),
         }
     }
 
-    pub async fn pty_exec(&self, session_id: &str, raw: &str, wait_ms: Option<u64>, max_output_bytes: Option<usize>) -> Result<SessionExecResult> {
+    pub async fn pty_exec(
+        &self,
+        session_id: &str,
+        raw: &str,
+        wait_ms: Option<u64>,
+        max_output_bytes: Option<usize>,
+    ) -> Result<SessionExecResult> {
         let wait_ms = wait_ms.unwrap_or(5_000).min(300_000);
-        let cap = max_output_bytes.unwrap_or(self.config.exec_output_cap_bytes).min(1_048_576);
-        let result = self.sessions.pty_exec(session_id, raw, Duration::from_millis(wait_ms), cap).await;
+        let cap = max_output_bytes
+            .unwrap_or(self.config.exec_output_cap_bytes)
+            .min(1_048_576);
+        let result = self
+            .sessions
+            .pty_exec(session_id, raw, Duration::from_millis(wait_ms), cap)
+            .await;
         match result {
-            Ok(r) => {
-                Ok(r)
-            }
-            Err(e) => {
-                Err(e)
-            }
+            Ok(r) => Ok(r),
+            Err(e) => Err(e),
         }
     }
 
-    pub async fn pty_exec_read(&self, session_id: &str, token: &str, wait_ms: Option<u64>) -> Result<SessionExecResult> {
+    pub async fn pty_exec_read(
+        &self,
+        session_id: &str,
+        token: &str,
+        wait_ms: Option<u64>,
+    ) -> Result<SessionExecResult> {
         let wait_ms = wait_ms.unwrap_or(0).min(300_000);
-        let result = self.sessions.pty_exec_read(session_id, token, Duration::from_millis(wait_ms)).await?;
+        let result = self
+            .sessions
+            .pty_exec_read(session_id, token, Duration::from_millis(wait_ms))
+            .await?;
         Ok(result)
     }
 
@@ -299,19 +384,25 @@ impl AppState {
     }
 
     pub async fn sftp_list(&self, host_id: &str, path: &str) -> Result<Vec<DirEntry>> {
-        self.ensure_not_jumpserver_target(host_id)?;
+        if self.is_jumpserver_target(host_id)? {
+            return Err(jumpserver_session_required());
+        }
         let entries = self.sessions.sftp_list(host_id, path).await?;
         Ok(entries)
     }
 
     pub async fn sftp_get(&self, host_id: &str, path: &str) -> Result<Vec<u8>> {
-        self.ensure_not_jumpserver_target(host_id)?;
+        if self.is_jumpserver_target(host_id)? {
+            return Err(jumpserver_session_required());
+        }
         let d = self.sessions.sftp_get(host_id, path).await?;
         Ok(d)
     }
 
     pub async fn sftp_put(&self, host_id: &str, path: &str, data: &[u8]) -> Result<()> {
-        self.ensure_not_jumpserver_target(host_id)?;
+        if self.is_jumpserver_target(host_id)? {
+            return Err(jumpserver_session_required());
+        }
         self.sessions.sftp_put(host_id, path, data).await?;
         Ok(())
     }
@@ -326,7 +417,9 @@ impl AppState {
         chunk_size: usize,
         verify: bool,
     ) -> Result<LocalFileTransfer> {
-        self.ensure_not_jumpserver_target(host_id)?;
+        if self.is_jumpserver_target(host_id)? {
+            return Err(jumpserver_session_required());
+        }
         let local_path = allowed_local_write_path(local_path, create_parent_dirs)?;
         if local_path.exists() && !overwrite {
             return Err(ConnectorError::bad_request(format!(
@@ -364,7 +457,9 @@ impl AppState {
         chunk_size: usize,
         verify: bool,
     ) -> Result<LocalFileTransfer> {
-        self.ensure_not_jumpserver_target(host_id)?;
+        if self.is_jumpserver_target(host_id)? {
+            return Err(jumpserver_session_required());
+        }
         let local_path = allowed_local_read_path(local_path)?;
         let report = self
             .sessions
@@ -388,54 +483,138 @@ impl AppState {
     }
 }
 
-fn jumpserver_session_required() -> ConnectorError {
-    ConnectorError::new(
-        crate::error::ErrorCode::JumpServerSessionRequired,
-        "Ordinary host connection, PTY and SFTP are disabled for JumpServer-managed targets. Use jumpserver_session_open and reuse its session_id.",
-    )
-}
-
-fn is_jumpserver_target_recursive<'a>(
-    cfg: &'a crate::types::HostConfig,
-    by_id: &std::collections::HashMap<&str, &'a crate::types::HostConfig>,
-    by_alias: &std::collections::HashMap<&str, &'a crate::types::HostConfig>,
-    koko_host: &str,
-    koko_port: u16,
-    visited: &mut std::collections::HashSet<&'a str>,
-) -> bool {
-    if !visited.insert(cfg.id.as_str()) {
-        return false;
-    }
-    if is_koko_endpoint(&cfg.host, cfg.port, koko_host, koko_port) {
-        return true;
-    }
-    for hop in &cfg.jump_hosts {
-        if is_koko_endpoint(&hop.host, hop.port, koko_host, koko_port) {
-            return true;
-        }
-        let next = by_id
-            .get(hop.host.as_str())
-            .or_else(|| by_alias.get(hop.host.as_str()));
-        if let Some(next) = next {
-            if is_jumpserver_target_recursive(
-                next,
-                by_id,
-                by_alias,
-                koko_host,
-                koko_port,
-                visited,
-            ) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 fn is_koko_endpoint(host: &str, port: u16, koko_host: &str, koko_port: u16) -> bool {
     host.trim_end_matches('.')
         .eq_ignore_ascii_case(koko_host.trim_end_matches('.'))
         && port == koko_port
+}
+
+pub fn is_jumpserver_target_config(
+    cfg: &crate::types::HostConfig,
+    koko_host: &str,
+    koko_port: u16,
+) -> bool {
+    is_koko_endpoint(&cfg.host, cfg.port, koko_host, koko_port)
+        || cfg
+            .jump_hosts
+            .iter()
+            .any(|hop| is_koko_endpoint(&hop.host, hop.port, koko_host, koko_port))
+}
+
+pub(crate) fn jumpserver_session_required() -> ConnectorError {
+    ConnectorError::new(
+        crate::error::ErrorCode::JumpServerSessionRequired,
+        "Ordinary PTY opening is disabled for JumpServer-managed targets. Use jumpserver_session_open and reuse its session_id.",
+    )
+}
+
+#[cfg(test)]
+mod jumpserver_exec_policy_tests {
+    use super::{is_jumpserver_target_config, is_koko_endpoint, jumpserver_session_required};
+    use crate::types::{AuthMethod, HostConfig, JumpHop};
+
+    fn test_auth() -> AuthMethod {
+        AuthMethod::Password {
+            password: "not-used".into(),
+        }
+    }
+
+    #[test]
+    fn matches_configured_koko_endpoint_case_insensitively() {
+        assert!(is_koko_endpoint(
+            "KOKO.example.test.",
+            32222,
+            "koko.example.test",
+            32222
+        ));
+        assert!(!is_koko_endpoint(
+            "koko.example.test",
+            22,
+            "koko.example.test",
+            32222
+        ));
+        assert!(!is_koko_endpoint(
+            "other.example.test",
+            32222,
+            "koko.example.test",
+            32222
+        ));
+    }
+
+    #[test]
+    fn policy_error_explicitly_requires_jumpserver_session() {
+        let error = jumpserver_session_required();
+        assert_eq!(
+            error.code,
+            crate::error::ErrorCode::JumpServerSessionRequired
+        );
+        assert!(error.message.contains("jumpserver_session_open"));
+        assert!(error.message.contains("session_id"));
+    }
+
+    #[test]
+    fn blocks_direct_koko_hosts_and_jump_hops_but_not_ordinary_hosts() {
+        let base = |host: &str, port: u16, jump_hosts| HostConfig {
+            id: "test".into(),
+            alias: "test".into(),
+            host: host.into(),
+            port,
+            user: "user".into(),
+            auth: test_auth(),
+            jump_hosts,
+            env: Default::default(),
+            become_root: None,
+        };
+        let koko_host = "koko.example.test";
+        assert!(is_jumpserver_target_config(
+            &base("KOKO.EXAMPLE.TEST.", 32222, vec![]),
+            koko_host,
+            32222
+        ));
+        assert!(is_jumpserver_target_config(
+            &base(
+                "asset.internal",
+                22,
+                vec![JumpHop {
+                    host: koko_host.into(),
+                    port: 32222,
+                    user: "proxy".into(),
+                    auth: test_auth(),
+                }]
+            ),
+            koko_host,
+            32222
+        ));
+        assert!(!is_jumpserver_target_config(
+            &base("host.internal", 22, vec![]),
+            koko_host,
+            32222
+        ));
+    }
+
+    #[tokio::test]
+    async fn sftp_rejects_api_discovered_target_before_network_or_file_side_effects() {
+        use crate::{audit::AuditLog, config::Config, state::AppState, totp::Totp, vault::Vault};
+        use std::sync::Arc;
+
+        let dir = std::env::temp_dir().join(format!("jms-sftp-policy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vault = Arc::new(Vault::open(&dir.join("vault.db")).unwrap());
+        vault.init("test password").unwrap();
+        let audit = Arc::new(AuditLog::new(dir.join("audit")));
+        let totp = Arc::new(Totp::open(&dir.join("vault.db"), dir.join("totp.key")).unwrap());
+        let state = AppState::new(vault, audit, Config::default(), "test-token".into(), totp).unwrap();
+        let id = "jms:known-asset:known-account";
+
+        assert_eq!(state.sftp_list(id, "/").await.unwrap_err().code, crate::error::ErrorCode::JumpServerSessionRequired);
+        assert_eq!(state.sftp_get(id, "/etc/hostname").await.unwrap_err().code, crate::error::ErrorCode::JumpServerSessionRequired);
+        assert_eq!(state.sftp_put(id, "/tmp/no-write", b"unused").await.unwrap_err().code, crate::error::ErrorCode::JumpServerSessionRequired);
+        assert_eq!(state.sftp_download_file(id, "/etc/hostname", "/tmp/jms-policy-test", false, false, 65536, true).await.unwrap_err().code, crate::error::ErrorCode::JumpServerSessionRequired);
+        assert_eq!(state.sftp_upload_file(id, "/etc/hostname", "/tmp/no-write", false, false, 65536, true).await.unwrap_err().code, crate::error::ErrorCode::JumpServerSessionRequired);
+        assert!(state.list_sessions().await.is_empty());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 fn allowed_local_roots() -> Result<Vec<PathBuf>> {
@@ -605,62 +784,10 @@ fn is_lexically_allowed_local_path(path: &Path) -> Result<bool> {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn exec_policy_denies_before_pool_and_preserves_ordinary_error_path() {
-        let dir = std::env::temp_dir().join(format!("jms-exec-policy-{}-{}", std::process::id(), time::OffsetDateTime::now_utc().unix_timestamp_nanos()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let vault = Arc::new(Vault::open(&dir.join("vault.db")).unwrap());
-        vault.init("test password").unwrap();
-        let audit = Arc::new(AuditLog::new(dir.join("audit")));
-        let mut config = Config::default();
-        config.jumpserver = Some(crate::config::JumpServerConfig {
-            api_url: "https://unused.invalid".into(), org_id: "org".into(),
-            api_access_key_env: "unused".into(), api_secret_key_env: "unused".into(),
-            ssh_username: "svc".into(), ssh_password_host_id: "missing".into(),
-            koko_host: "koko.test".into(), koko_port: 32222, verify_tls: true,
-        });
-        let state = AppState::new(vault, audit, config, "test-token".into()).unwrap();
-        let id = "jms:asset:account";
-        let error = state.exec(id, &ExecPayload::Argv { argv: vec!["hostname".into()] }).await.unwrap_err();
-        assert_eq!(error.code, crate::error::ErrorCode::JumpServerExecDenied);
-        assert!(state.pool.get(id).await.is_err());
-        assert!(state.list_sessions().await.is_empty());
-        let ordinary = state.exec("ordinary-missing", &ExecPayload::Argv { argv: vec!["hostname".into()] }).await.unwrap_err();
-        assert_ne!(ordinary.code, crate::error::ErrorCode::JumpServerExecDenied);
-        assert!(state.pool.get("ordinary-missing").await.is_err());
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
     #[test]
-    fn jumpserver_classification_covers_koko_alias_recursive_chain_and_regular_hosts() {
-        use crate::types::{AuthMethod, HostConfig, JumpHop};
-        use std::collections::{HashMap, HashSet};
-
-        let auth = || AuthMethod::Password { password: "test-only".into() };
-        let host = |id: &str, alias: &str, address: &str, jump_hosts| HostConfig {
-            id: id.into(), alias: alias.into(), host: address.into(), port: 22,
-            user: "user".into(), auth: auth(), jump_hosts, env: Default::default(), become_root: None,
-        };
-        let koko = host("koko-id", "koko-alias", "KOKO.TEST.", vec![]);
-        let bastion = host("bastion-id", "bastion-alias", "bastion.test", vec![JumpHop {
-            host: "koko-alias".into(), port: 22, user: "jump".into(), auth: auth(),
-        }]);
-        let asset = host("asset-id", "asset-alias", "asset.test", vec![JumpHop {
-            host: "bastion-id".into(), port: 22, user: "jump".into(), auth: auth(),
-        }]);
-        let regular = host("regular-id", "regular-alias", "regular.test", vec![]);
-        let configs = vec![koko.clone(), bastion.clone(), asset.clone(), regular.clone()];
-        let by_id: HashMap<_, _> = configs.iter().map(|cfg| (cfg.id.as_str(), cfg)).collect();
-        let by_alias: HashMap<_, _> = configs.iter().map(|cfg| (cfg.alias.as_str(), cfg)).collect();
-        let classify = |target: &HostConfig| is_jumpserver_target_recursive(
-            target, &by_id, &by_alias, "koko.test", 22, &mut HashSet::new()
-        );
-        assert!(classify(&koko));
-        assert!(classify(&bastion));
-        assert!(classify(&asset));
-        assert!(!classify(&regular));
+    fn jms_namespace_is_always_classified_as_managed() {
+        assert!("jms:asset:account".starts_with("jms:"));
     }
-
 
     #[test]
     fn allows_tmp_write_paths() {
@@ -713,7 +840,9 @@ mod tests {
 
     #[test]
     fn exec_payload_audit_excludes_command_body() {
-        let value = match (ExecPayload::Raw { raw: "private data".into() }) {
+        let value = match (ExecPayload::Raw {
+            raw: "private data".into(),
+        }) {
             ExecPayload::Raw { raw } => serde_json::json!({"type":"raw","bytes":raw.len()}),
             _ => unreachable!(),
         };

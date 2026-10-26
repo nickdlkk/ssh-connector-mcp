@@ -12,6 +12,7 @@ mod session;
 mod ssh;
 mod state;
 mod term;
+mod totp;
 mod vault;
 mod web;
 

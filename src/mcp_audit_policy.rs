@@ -20,7 +20,7 @@ pub fn sanitize_input(input: Value) -> Value {
     match input {
         Value::Object(map) => Value::Object(map.into_iter().filter_map(|(key, value)| {
             let lower=key.to_ascii_lowercase();
-            if SENSITIVE.iter().any(|v| lower.contains(v)) { return None; }
+            if lower.contains("code") || lower.contains("secret") || lower.contains("password") || SENSITIVE.iter().any(|v| lower.contains(v)) { return None; }
             if SAFE_SCALARS.contains(&lower.as_str()) {
                 let val=match value { Value::String(s)=>Value::String(s.chars().take(128).collect()), other=>other };
                 Some((key,val))
@@ -35,6 +35,9 @@ pub fn sanitize_input(input: Value) -> Value {
 }
 
 pub fn sanitize_output(value: &Value, method: &str) -> Value {
+    if method.contains("vault/totp/") {
+        return serde_json::json!({"redacted":true});
+    }
     if method == "credential_reveal" || method == "reveal_host" || method.ends_with("/reveal") {
         return serde_json::json!({"returned":true,"redacted":true});
     }
@@ -79,6 +82,14 @@ fn sanitize_output_value(value: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn totp_codes_are_removed_from_audit_input() {
+        let input = sanitize_input(serde_json::json!({"code":"123456","Code":"654321","nested":{"code":"000000"}}));
+        assert!(!input.to_string().contains("123456"));
+        assert!(!input.to_string().contains("654321"));
+        assert!(!input.to_string().contains("000000"));
+    }
+
     #[test]
     fn strips_secrets_and_keeps_safe_metadata() {
         let input=sanitize_input(serde_json::json!({"host_id":"host","password":"hidden","raw":"danger","wait_ms":500,"other":"free text"}));

@@ -31,6 +31,7 @@ SSH Connector MCP 把职责拆开：
 ## 特性
 
 - **AI 安全凭据边界**：密码和私钥用主密码加密落盘；MCP 工具永不返回存储的明文凭据。
+- **可选 Vault TOTP 解锁**：提供 Web 设置页面，可使用本地生成的二维码扫描或点击复制文本密钥添加验证器，并通过六位验证码确认绑定；支持经过主密码二次认证后换绑或解绑。Vault 可由 Web 或 `vault_unlock_totp` 以 RFC 6238 验证码解锁。验证码必须由用户当前提供，禁止猜码或自动重试。独立 root-only `totp.key` 必须和 `vault.db` 成对备份；丢失密钥时失败关闭。TOTP 不是 SSH 登录 MFA 或远程用户认证；主密码仍可恢复 Vault。
 - **仅监听本机**：Web UI 和 Streamable HTTP MCP 都绑定 `127.0.0.1`。
 - **安全短命令**：`exec` 支持自动 POSIX 转义的 `argv`、多行 `script`，以及明确自负 shell quoting 的 `raw`。
 - **持久交互会话**：可打开 PTY、发送文本/按键、读取结构化屏幕、调整尺寸和关闭。
@@ -48,7 +49,7 @@ SSH Connector MCP 把职责拆开：
 推荐的生产形态是本地 daemon + Streamable HTTP MCP endpoint：
 
 ```bash
-cargo install --git https://github.com/nickdlkk/ssh-connector-mcp --tag v0.1.2 ssh-connector --locked
+cargo install --git https://github.com/nickdlkk/ssh-connector-mcp --tag v0.1.4 ssh-connector --locked
 ssh-connector --data-dir ~/.ssh-connector
 ```
 
@@ -66,10 +67,10 @@ ssh-connector --data-dir ~/.ssh-connector
 ```
 
 可使用同一 Release 中的 `SHA256SUMS` 校验下载文件。发布工作流位于
-`.github/workflows/release.yml`，推送 `v*.*.*` 标签后会自动构建并发布。v0.1.2
-新增本地 SQLite 审计库、UTC滚动保留7天、旧JSONL导入（保留原文件）、
-审计筛选/排序/游标分页及有界秘密过滤。MCP/Web API 在 handler 边界记审计；
-不保存 WebSocket 帧正文。详见 [docs/audit-sqlite.md](docs/audit-sqlite.md)。
+`.github/workflows/release.yml`，推送 `v*.*.*` 标签后会自动构建并发布。
+v0.1.4 新增 JumpServer KoKo SFTP 文件工具，以及按机器名/FQDN/IP 一次搜索
+资产和账号元数据的 `jumpserver_search_asset_accounts`；同时包含本 README
+记录的 JumpServer 访问策略与 Vault TOTP/安全更新。账号凭据不会返回给 MCP。
 
 v0.1.1 新增已有 PTY 会话的长命令 token 轮询工具（`session_exec` 与
 `session_exec_read`）；首次等待结束不会取消远端命令。
@@ -248,9 +249,14 @@ Network: 127.0.0.1 only
 | `session_send_text`, `session_send_key` | 驱动 PTY 输入。 |
 | `session_screen`, `session_read` | 检查 PTY 屏幕或增量输出。 |
 | `session_resize`, `session_close`, `session_list` | 管理 live PTY 会话。 |
-| `sftp_list`, `sftp_get`, `sftp_put` | 通过 SFTP 传输 UTF-8 文本文件。 |
-| `sftp_download_file`, `sftp_upload_file` | 通过本地路径流式传输大体积二进制文件，支持父目录、覆盖控制、临时文件提交、失败清理和 SHA-256 校验。 |
-| `sftp_get_base64`, `sftp_put_base64` | 传输能安全放进 MCP 上下文的小体积二进制 payload。 |
+| `jumpserver_asset_list`, `jumpserver_asset_accounts` | 发现当前 API 身份可见的 JumpServer 资产，或查询指定资产的非秘密账号信息。 |
+| `jumpserver_search_asset_accounts` | 按机器名/FQDN/IP 子串搜索，并在一次调用中返回匹配资产与账号元数据。 |
+| `jumpserver_session_open` | 为 JumpServer 资产/账号打开持久 PTY，并复用返回的 session ID。 |
+| `jumpserver_sftp_list`, `jumpserver_sftp_get`, `jumpserver_sftp_put`, `jumpserver_sftp_put_base64` | 通过 KoKo SFTP subsystem 列目录及传输小型文本/二进制文件。 |
+| `jumpserver_sftp_download_file`, `jumpserver_sftp_upload_file` | 在授权 JumpServer 资产和本地路径间流式传输文件，提供覆盖控制和可选 SHA-256 校验。 |
+| `sftp_list`, `sftp_get`, `sftp_put` | 普通 SSH SFTP 的 UTF-8 文本传输；不可用于 JumpServer 纳管目标。 |
+| `sftp_download_file`, `sftp_upload_file` | 普通 SSH SFTP 的大文件流式传输，支持覆盖控制与 SHA-256 校验。 |
+| `sftp_get_base64`, `sftp_put_base64` | 普通 SSH SFTP 小型二进制 base64 传输。 |
 
 ## 主机凭据参数结构
 
@@ -540,6 +546,9 @@ MIT
 
 `session_exec` 在已有 `session_open` shell 中执行一条单行命令，保留 `cd`、导出变量等 shell 状态。返回合并后的 PTY `output`（stdout/stderr 无法区分）、`exit_code`、`duration_ms`、`timed_out` 与 `truncated`；不同于 `exec`，它使用已有 PTY，不新建或关闭 SSH 会话。`wait_ms` 最大 300000；`max_output_bytes` 默认取配置，最大 1048576。首次 `wait_ms`（默认 5000）只限制本次等待，不会取消远端命令。等待时间到期时返回 `timed_out=true` 和不透明 `token`；之后对同一 session 调用 `session_exec_read`，可获取增量输出及最终退出码。命令完成后 token 清空。审计仅记录元数据，不记录命令或输出。命令可能改变远端状态。
 
+
 ## JumpServer 执行策略
 
-对已识别的目标，服务端在连接池或文件传输前拒绝单步 `exec`、普通 `host_connect`、`session_open`/`session_open_root` 及全部 SFTP 工具。识别覆盖 API 发现的 `jms:` ID、配置的 KoKo endpoint，以及按主机 ID/别名递归追踪的 SSH 跳板链；Vault 读取/解密失败时 fail-closed。应通过 JumpServer API 发现资产与账号，调用一次 `jumpserver_session_open` 并复用 `session_id`。策略错误在 MCP structured error data 中携带稳定业务码；普通 SSH 主机保留 `exec` 和 SFTP 能力。
+资产/账号查询可调用 `jumpserver_search_asset_accounts`，传机器名、FQDN 或 IP 的大小写不敏感子串，一次返回匹配资产及账号名、username 和非秘密元数据。搜索范围是当前 JumpServer API 身份可见的资产，并非无权限边界的全局搜索。不会返回账号凭据。
+
+对已识别的 JumpServer 管理目标，服务端在连接池或文件传输前拒绝普通 host_id 的单步 `exec`、普通连接/PTY 及 SFTP 操作。文件传输请通过 JumpServer API 发现资产与授权账号，再调用专用 `jumpserver_sftp_*` MCP 工具；这些工具按资产/账号映射连接 KoKo 的 SFTP subsystem。不要把 JumpServer 资产 ID 传给普通 `host_id` SFTP 工具。命令/PTY 操作仍通过唯一的 `jumpserver_session_open` 路径并复用 `session_id`。策略错误在 MCP structured error data 中携带稳定业务码。普通 SSH 主机仍可正常使用 `exec` 和 SFTP。

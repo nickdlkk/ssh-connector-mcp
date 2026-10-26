@@ -7,6 +7,7 @@
 // ── State ──────────────────────────────────────────────────────
 const state = {
   vaultInitialized: false,
+  totpEnabled: false,
   vaultUnlocked: false,
   currentView: 'hosts',
   hosts: [],
@@ -138,6 +139,28 @@ const el = {
   revealError:      () => $('reveal-error'),
   revealResult:     () => $('reveal-result'),
   revealContent:    () => $('reveal-content'),
+  // TOTP security dialog
+  totpSettingsBtn:  () => $('totp-settings-btn'),
+  totpModal:        () => $('totp-modal'),
+  totpModalClose:   () => $('totp-modal-close'),
+  totpStatus:       () => $('totp-modal-status'),
+  totpEnrollment:   () => $('totp-enrollment'),
+  totpSecondaryForm:() => $('totp-secondary-form'),
+  totpSecondaryMp:  () => $('totp-secondary-mp'),
+  totpSecret:       () => $('totp-secret'),
+  totpQr:           () => $('totp-qr'),
+  totpCode:         () => $('totp-code'),
+  totpConfirmMp:    () => $('totp-confirm-mp'),
+  totpConfirmBtn:   () => $('totp-confirm-btn'),
+  totpCancelBtn:    () => $('totp-cancel-btn'),
+  totpCopyBtn:      () => $('totp-copy-btn'),
+  totpEnrollError:  () => $('totp-enroll-error'),
+  totpBoundActions: () => $('totp-bound-actions'),
+  totpReplaceBtn:   () => $('totp-replace-btn'),
+  totpDisableBtn:   () => $('totp-disable-btn'),
+  totpPhase:        'idle',
+  totpNextSecret:   null,
+  totpNextUri:      null,
 };
 
 // ── API helpers ─────────────────────────────────────────────────
@@ -165,6 +188,14 @@ const api = {
   status:          ()       => apiFetch('GET',    '/status'),
   vaultInit:       (mp)     => apiFetch('POST',   '/vault/init',   { master_password: mp }),
   vaultUnlock:     (mp)     => apiFetch('POST',   '/vault/unlock', { master_password: mp }),
+  totpUnlock:      (code)   => apiFetch('POST',   '/vault/totp/unlock', { code }),
+  totpEnrollStart: (mp)     => apiFetch('POST', '/vault/totp/enroll/start', { master_password: mp }),
+  totpEnrollConfirm: (code, mp) => apiFetch('POST', '/vault/totp/enroll/confirm', { code, master_password: mp }),
+  totpEnrollCancel: () => apiFetch('POST', '/vault/totp/enroll/cancel'),
+  totpReplaceStart: (mp) => apiFetch('POST', '/vault/totp/replace/start', { master_password: mp }),
+  totpReplaceConfirm: (code, mp) => apiFetch('POST', '/vault/totp/replace/confirm', { code, master_password: mp }),
+  totpDisable:     (mp)     => apiFetch('POST',   '/vault/totp/disable', { master_password: mp }),
+  vaultLock:       ()       => apiFetch('POST',   '/vault/lock'),
   getHosts:        ()       => apiFetch('GET',    '/hosts'),
   getJumpServerAssets: () => apiFetch('GET', '/jumpserver/assets'),
   getJumpServerAccounts: (id) => apiFetch('GET', `/jumpserver/assets/${encodeURIComponent(id)}/accounts`),
@@ -224,11 +255,29 @@ async function checkVaultStatus() {
     const s = await api.status();
     state.vaultInitialized = s.vault_initialized;
     state.vaultUnlocked    = s.vault_unlocked;
+    state.totpEnabled      = s.totp_enabled === true;
   } catch (e) {
     showToast('无法连接本地服务: ' + describeError(e), 'error');
     state.vaultInitialized = false;
     state.vaultUnlocked    = false;
+    state.totpEnabled      = false;
   }
+}
+
+function selectUnlockMethod(method) {
+  const totpAvailable = state.vaultInitialized && state.totpEnabled;
+  const selected = method === 'totp' ? 'totp' : 'password';
+  $('unlock-panel-password').classList.toggle('hidden', selected !== 'password');
+  $('unlock-panel-totp').classList.toggle('hidden', selected !== 'totp');
+  $('unlock-tab-password').classList.toggle('active', selected === 'password');
+  $('unlock-tab-password').setAttribute('aria-selected', selected === 'password' ? 'true' : 'false');
+  $('unlock-tab-totp').classList.toggle('active', selected === 'totp');
+  $('unlock-tab-totp').setAttribute('aria-selected', selected === 'totp' ? 'true' : 'false');
+  $('totp-unbound-hint').classList.toggle('hidden', totpAvailable);
+  $('totp-code-field').classList.toggle('hidden', !totpAvailable);
+  $('totp-unlock-btn').disabled = !totpAvailable;
+  if (selected === 'totp' && totpAvailable) $('mp-totp-input').focus();
+  else if (selected === 'password') el.mpInput().focus();
 }
 
 function showLockScreen() {
@@ -238,8 +287,10 @@ function showLockScreen() {
   el.lockSubtitle().textContent = isInit
     ? '首次运行: 设置主密码以初始化凭据库。'
     : '凭据库已锁定。输入主密码继续。';
-  el.lockSubmit().textContent = isInit ? '初始化凭据库' : '解锁';
+  el.lockSubmit().textContent = isInit ? '初始化凭据库' : '使用主密码解锁';
+  $('unlock-tab-totp').classList.toggle('hidden', isInit);
   el.mpConfirmWrap().classList.toggle('hidden', !isInit);
+  selectUnlockMethod('password');
   el.lockError().classList.add('hidden');
   el.mpInput().value = '';
   if (el.mpConfirm()) el.mpConfirm().value = '';
@@ -276,6 +327,138 @@ async function handleLockSubmit(e) {
   }
 }
 
+async function handleTotpUnlock() {
+  const code = $('mp-totp-input').value.trim();
+  if (!/^[0-9]{6}$/.test(code)) { showLockError('请输入 6 位验证码。'); return; }
+  $('totp-unlock-btn').disabled = true;
+  try {
+    await api.totpUnlock(code);
+    $('mp-totp-input').value = '';
+    state.vaultUnlocked = true;
+    showApp();
+  } catch (_) {
+    $('mp-totp-input').value = '';
+    showLockError('验证码无效或已使用，请检查时间同步后重试。');
+  } finally { $('totp-unlock-btn').disabled = false; }
+}
+function clearTotpProvisioning() {
+  state.totpNextSecret = null;
+  state.totpNextUri = null;
+  state.totpPhase = 'idle';
+  if (el.totpQr()) el.totpQr().removeAttribute('src');
+  if (el.totpSecret()) el.totpSecret().value = '';
+  if (el.totpCode()) el.totpCode().value = '';
+  if (el.totpConfirmMp()) el.totpConfirmMp().value = '';
+  el.totpEnrollment()?.classList.add('hidden');
+  el.totpSecondaryForm()?.classList.remove('hidden');
+  el.totpSecondaryMp().value = '';
+}
+
+function closeTotpDialog() {
+  if (state.totpPhase === 'enroll' || state.totpPhase === 'replace' || state.totpPhase === 'replace-auth' || state.totpPhase === 'disable-auth') {
+    void api.totpEnrollCancel().catch(() => {});
+  }
+  clearTotpProvisioning();
+  el.totpModal().classList.add('hidden');
+}
+
+function openTotpDialog() {
+  clearTotpProvisioning();
+  el.totpStatus().textContent = state.totpEnabled
+    ? '已绑定验证器。换绑时，旧验证器在新验证码确认成功前仍然有效。'
+    : '尚未绑定验证器。请使用二维码扫描，或复制文本密钥手动添加。';
+  $('totp-start-btn').textContent = state.totpEnabled ? '验证并开始换绑' : '验证并开始绑定';
+  el.totpBoundActions().classList.toggle('hidden', !state.totpEnabled);
+  el.totpSecondaryForm().classList.toggle('hidden', state.totpEnabled);
+  el.totpModal().classList.remove('hidden');
+}
+
+async function beginTotpEnrollment() {
+  const mp = el.totpSecondaryMp().value;
+  if (!mp) { showTotpError('请重新输入 Vault 主密码进行二次认证。'); return; }
+  const button = $('totp-start-btn');
+  button.disabled = true;
+  try {
+    // Rebind before any confirmed replacement continues to use the OTP+confirmation form.
+    if (state.totpPhase === 'disable-auth') {
+      await api.totpDisable(mp);
+      state.totpEnabled = false;
+      $('totp-state-label').textContent = 'TOTP：未绑定';
+      closeTotpDialog();
+      showToast('TOTP 已解绑', 'success');
+      return;
+    }
+    const replacing = state.totpPhase === 'replace-auth';
+    const result = replacing ? await api.totpReplaceStart(mp) : await api.totpEnrollStart(mp);
+    state.totpPhase = replacing ? 'replace' : 'enroll';
+    state.totpNextSecret = result.secret;
+    state.totpNextUri = result.otpauth_uri;
+    el.totpQr().src = `data:image/svg+xml;base64,${result.qr_svg_base64}`;
+    el.totpSecret().value = result.secret;
+    el.totpCode().value = '';
+    el.totpEnrollError().classList.add('hidden');
+    el.totpSecondaryForm().classList.add('hidden');
+    el.totpEnrollment().classList.remove('hidden');
+    el.totpConfirmBtn().textContent = replacing ? '确认换绑' : '确认绑定';
+    el.totpConfirmMp().value = '';
+  } catch (_) { showTotpError('二次认证失败或无法启动绑定；请确认 Vault 状态并重试。'); }
+  finally { button.disabled = false; }
+}
+
+function showTotpError(message) {
+  el.totpEnrollError().textContent = message;
+  el.totpEnrollError().classList.remove('hidden');
+}
+
+async function confirmTotpEnrollment(event) {
+  event.preventDefault();
+  const code = el.totpCode().value.trim();
+  if (!/^[0-9]{6}$/.test(code)) { showTotpError('请输入 6 位数字验证码。'); return; }
+  const confirmMp = el.totpConfirmMp().value;
+  if (!confirmMp) { showTotpError('请输入 Vault 主密码完成二次认证。'); return; }
+  el.totpConfirmBtn().disabled = true;
+  try {
+    const replaced = state.totpPhase === 'replace';
+    const disabled = state.totpPhase === 'disable-auth';
+    if (disabled && !confirm('确认解绑 TOTP？解绑后将仅使用主密码解锁 Vault。')) return;
+    if (replaced) await api.totpReplaceConfirm(code, confirmMp);
+    else if (disabled) await api.totpDisable(confirmMp);
+    else await api.totpEnrollConfirm(code, confirmMp);
+    state.totpEnabled = !disabled;
+    const actionLabel = disabled ? 'TOTP 已解绑' : replaced ? '验证器换绑成功' : 'TOTP 绑定成功';
+    $('totp-state-label').textContent = state.totpEnabled ? 'TOTP：已绑定' : 'TOTP：未绑定';
+    closeTotpDialog();
+    showToast(actionLabel, 'success');
+  } catch (_) { showTotpError('验证码无效、已过期或二次认证失败；当前绑定保持不变。'); }
+  finally { el.totpConfirmBtn().disabled = false; el.totpConfirmMp().value = ''; }
+}
+
+async function cancelTotpEnrollment() {
+  try { await api.totpEnrollCancel(); } catch (_) {}
+  clearTotpProvisioning();
+  el.totpModal().classList.add('hidden');
+}
+
+function replaceTotpBinding() {
+  el.totpSecondaryMp().value = '';
+  el.totpStatus().textContent = '请进行二次密码认证后开始换绑。旧验证器在新验证器确认绑定前继续有效。';
+  el.totpBoundActions().classList.add('hidden');
+  el.totpSecondaryForm().classList.remove('hidden');
+  $('totp-start-btn').textContent = '验证并开始换绑';
+  state.totpPhase = 'replace-auth';
+}
+
+function beginDisableTotpBinding() {
+  el.totpSecondaryMp().value = '';
+  el.totpStatus().textContent = '解绑同样需要重新输入 Vault 主密码进行二次认证。';
+  el.totpBoundActions().classList.add('hidden');
+  el.totpSecondaryForm().classList.remove('hidden');
+  $('totp-start-btn').textContent = '二次认证并解绑';
+  state.totpPhase = 'disable-auth';
+}
+
+
+
 function showLockError(msg) {
   const errEl = el.lockError();
   errEl.textContent = msg;
@@ -285,7 +468,7 @@ function showLockError(msg) {
 function setLockBusy(busy) {
   el.lockSubmit().disabled = busy;
   el.lockSubmit().textContent = busy ? '请稍候…'
-    : (!state.vaultInitialized ? '初始化凭据库' : '解锁');
+    : (!state.vaultInitialized ? '初始化凭据库' : '使用主密码解锁');
 }
 
 // ── Hosts view ──────────────────────────────────────────────────
@@ -1207,14 +1390,36 @@ async function boot() {
 function attachEventListeners() {
   // Lock form
   el.lockForm().addEventListener('submit', handleLockSubmit);
+  $('unlock-tab-password').addEventListener('click', () => selectUnlockMethod('password'));
+  $('unlock-tab-totp').addEventListener('click', () => selectUnlockMethod('totp'));
+  $('totp-unlock-btn').addEventListener('click', handleTotpUnlock);
+  $('mp-totp-input').addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); handleTotpUnlock(); } });
 
+  el.totpSettingsBtn().addEventListener('click', openTotpDialog);
+  el.totpModalClose().addEventListener('click', closeTotpDialog);
+  el.totpModal().addEventListener('click', (event) => { if (event.target === el.totpModal()) closeTotpDialog(); });
+  el.totpSecondaryForm().addEventListener('submit', (event) => { event.preventDefault(); beginTotpEnrollment(); });
+  $('totp-confirm-form').addEventListener('submit', confirmTotpEnrollment);
+  el.totpConfirmBtn().addEventListener('click', confirmTotpEnrollment);
+  el.totpCancelBtn().addEventListener('click', cancelTotpEnrollment);
+  el.totpReplaceBtn().addEventListener('click', replaceTotpBinding);
+  el.totpDisableBtn().addEventListener('click', beginDisableTotpBinding);
+  el.totpCode().addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); confirmTotpEnrollment(event); } });
+  el.totpCopyBtn().addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(el.totpSecret().value); showToast('TOTP 密钥已复制', 'success'); }
+    catch (_) { el.totpSecret().focus(); el.totpSecret().select(); showTotpError('浏览器不允许剪贴板访问，请手动复制已选中的密钥。'); }
+  });
+  $('totp-start-btn').textContent = state.totpEnabled ? '验证并开始换绑' : '验证并开始绑定';
+  $('totp-state-label').textContent = state.totpEnabled ? 'TOTP：已绑定' : 'TOTP：未绑定';
   // Lock vault button
-  el.lockBtn().addEventListener('click', () => {
-    // The daemon holds session state; we just return to the lock screen locally.
-    state.vaultUnlocked = false;
-    stopSessionsPoller();
-    closeTerminal();
-    showLockScreen();
+  el.lockBtn().addEventListener('click', async () => {
+    try {
+      await api.vaultLock();
+      state.vaultUnlocked = false;
+      stopSessionsPoller();
+      closeTerminal();
+      showLockScreen();
+    } catch (err) { showToast('锁定凭据库失败: ' + describeError(err), 'error'); }
   });
 
   // Nav

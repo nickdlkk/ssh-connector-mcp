@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SSH 连接器</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=20261002-tabs-fix" />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css" />
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
@@ -18,18 +18,30 @@
       <h1 class="lock-title">SSH 连接器</h1>
       <p id="lock-subtitle" class="lock-subtitle"></p>
       <form id="lock-form" novalidate>
-        <div class="field-group">
-          <label for="mp-input">主密码</label>
-          <input id="mp-input" type="password" autocomplete="current-password"
-            placeholder="输入主密码" required />
+        <div class="lock-method-tabs" role="tablist" aria-label="解锁方式">
+          <button id="unlock-tab-password" class="lock-method-tab active" type="button" role="tab" aria-selected="true" aria-controls="unlock-panel-password">主密码</button>
+          <button id="unlock-tab-totp" class="lock-method-tab hidden" type="button" role="tab" aria-selected="false" aria-controls="unlock-panel-totp">TOTP 验证码</button>
         </div>
-        <div id="mp-confirm-wrap" class="field-group hidden">
-          <label for="mp-confirm">确认主密码</label>
-          <input id="mp-confirm" type="password" autocomplete="new-password"
-            placeholder="再次输入主密码" />
-        </div>
+        <section id="unlock-panel-password" class="lock-method-panel" role="tabpanel" aria-labelledby="unlock-tab-password">
+          <div class="field-group">
+            <label for="mp-input">主密码</label>
+            <input id="mp-input" type="password" autocomplete="current-password" placeholder="输入主密码" required />
+          </div>
+          <div id="mp-confirm-wrap" class="field-group hidden">
+            <label for="mp-confirm">确认主密码</label>
+            <input id="mp-confirm" type="password" autocomplete="new-password" placeholder="再次输入主密码" />
+          </div>
+          <button id="lock-submit" type="submit" class="btn btn-primary btn-full">解锁</button>
+        </section>
+        <section id="unlock-panel-totp" class="lock-method-panel hidden" role="tabpanel" aria-labelledby="unlock-tab-totp">
+          <p id="totp-unbound-hint" class="lock-method-hint hidden">当前还没有绑定验证器。请先用主密码解锁，再到侧栏“安全设置”完成绑定。</p>
+          <div id="totp-code-field" class="field-group">
+            <label for="mp-totp-input">当前 6 位 TOTP 验证码</label>
+            <input id="mp-totp-input" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="输入验证码" />
+          </div>
+          <button id="totp-unlock-btn" type="button" class="btn btn-primary btn-full">使用 TOTP 解锁</button>
+        </section>
         <div id="lock-error" class="inline-error hidden" role="alert" aria-live="assertive"></div>
-        <button id="lock-submit" type="submit" class="btn btn-primary btn-full">解锁</button>
       </form>
     </div>
   </div>
@@ -53,6 +65,8 @@
         <span>凭据只写入加密 vault</span>
         <span>AI 侧仅引用 host_id</span>
         <span>HTTP/MCP 仅监听 127.0.0.1</span>
+        <span id="totp-state-label">TOTP 状态加载中</span>
+        <button id="totp-settings-btn" class="btn btn-ghost btn-sm" type="button">安全设置</button>
       </div>
       <div class="sidebar-footer">
         <button id="lock-btn" class="btn btn-ghost btn-sm">锁定凭据库</button>
@@ -307,6 +321,45 @@
     </div>
   </div>
 
-  <script type="module" src="app.js"></script>
+  <div id="totp-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="totp-modal-title">
+    <section class="modal totp-modal-card">
+      <header class="modal-header">
+        <div><span class="view-kicker">SECURITY SETTINGS</span><h2 id="totp-modal-title">Vault 双重验证</h2></div>
+        <button id="totp-modal-close" class="modal-close" type="button" aria-label="关闭">×</button>
+      </header>
+      <div class="modal-body">
+        <p id="totp-modal-status" class="totp-status-text"></p>
+        <div id="totp-bound-actions" class="totp-actions hidden">
+          <button id="totp-replace-btn" class="btn btn-primary" type="button">换绑验证器</button>
+          <button id="totp-disable-btn" class="btn btn-danger" type="button">解绑 TOTP</button>
+        </div>
+        <form id="totp-secondary-form" class="field-group" novalidate>
+          <label for="totp-secondary-mp">二次认证：重新输入 Vault 主密码</label>
+          <input id="totp-secondary-mp" type="password" autocomplete="current-password" required />
+          <button id="totp-start-btn" class="btn btn-primary" type="submit">验证并开始绑定</button>
+        </form>
+        <section id="totp-enrollment" class="totp-enrollment hidden" aria-label="验证器绑定确认">
+          <div class="totp-provision-grid">
+            <figure class="totp-qr-box"><img id="totp-qr" alt="TOTP 验证器二维码" /><figcaption>用 Authenticator 扫描二维码</figcaption></figure>
+            <div class="totp-manual-box">
+              <label for="totp-secret">或复制文本密钥</label>
+              <div class="totp-secret-row"><input id="totp-secret" type="text" readonly spellcheck="false" /><button id="totp-copy-btn" class="btn btn-ghost" type="button">复制</button></div>
+              <p class="hint">密钥仅此次显示。请勿截图、分享或粘贴到不可信页面。</p>
+            </div>
+          </div>
+          <form id="totp-confirm-form" class="totp-confirm-form" novalidate>
+            <label for="totp-code">输入验证器当前 6 位验证码</label>
+            <input id="totp-code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="000000" required />
+            <label for="totp-confirm-mp">再次输入 Vault 主密码确认绑定</label>
+            <input id="totp-confirm-mp" type="password" autocomplete="current-password" required />
+            <p id="totp-enroll-error" class="inline-error hidden" role="alert"></p>
+            <div class="totp-actions"><button id="totp-cancel-btn" class="btn btn-ghost" type="button">取消</button><button id="totp-confirm-btn" class="btn btn-primary" type="submit">确认绑定</button></div>
+          </form>
+        </section>
+      </div>
+    </section>
+  </div>
+
+  <script src="app.js?v=20261002-unlock-tabs"></script>
 </body>
 </html>

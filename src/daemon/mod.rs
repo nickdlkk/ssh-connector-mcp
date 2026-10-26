@@ -32,6 +32,7 @@ pub async fn run(opts: DaemonOptions) -> anyhow::Result<()> {
     }
     let vault = Arc::new(Vault::open(&data_dir.join("vault.db"))?);
     let audit = Arc::new(AuditLog::try_new(data_dir.join("audit"))?);
+    let totp = Arc::new(crate::totp::Totp::open(&data_dir.join("vault.db"), data_dir.join("totp.key"))?);
     let audit_retention = audit.clone();
     let retention_interval_secs = std::env::var("SSH_CONNECTOR_AUDIT_PRUNE_INTERVAL_SECS")
         .ok()
@@ -54,7 +55,7 @@ pub async fn run(opts: DaemonOptions) -> anyhow::Result<()> {
     maybe_unlock(&vault, &opts)?;
 
     let local_token = generate_token();
-    let state = AppState::new(vault, audit, cfg.clone(), local_token)?;
+    let state = AppState::new(vault, audit, cfg.clone(), local_token, totp)?;
 
     if opts.stdio_mcp {
         // stdio MCP requires an already-unlocked vault (no interactive prompt).
@@ -119,7 +120,11 @@ fn resolve_static_dir(data_dir: &PathBuf) -> PathBuf {
     if candidate.is_dir() {
         return candidate;
     }
-    PathBuf::from("static")
+    let executable_candidate = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join("static")))
+        .filter(|path| path.is_dir());
+    executable_candidate.unwrap_or_else(|| PathBuf::from("static"))
 }
 
 fn generate_token() -> String {

@@ -102,6 +102,29 @@ body::before {
 .btn-sm { min-height: 30px; padding: 5px 10px; font-size: 12px; }
 .btn-full { width: 100%; }
 
+.lock-method-hint { color: var(--color-text-muted); background: var(--color-warning-bg, #fff7e6); border-radius: 8px; padding: 12px; margin: 0 0 14px; font-size: 13px; line-height: 1.5; }
+.lock-method-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 18px; background: rgba(65, 48, 38, .06); border-radius: 10px; }
+.lock-method-tab { min-height: 38px; border: 0; border-radius: 7px; background: transparent; color: var(--color-text-muted); font: 600 13px/1.2 var(--font-ui); cursor: pointer; transition: background var(--transition), color var(--transition), box-shadow var(--transition); }
+.lock-method-tab:hover { color: var(--color-text); background: rgba(255,255,255,.55); }
+.lock-method-tab.active { color: var(--color-text); background: #fff; box-shadow: 0 1px 4px rgba(52, 40, 32, .12); }
+.lock-method-panel { min-height: 150px; }
+.lock-method-panel.hidden { display: none; }
+
+.totp-modal-card { width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; }
+.totp-status-text { color: var(--color-text-muted); margin: 0 0 18px; }
+.totp-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+.totp-enrollment { border-top: 1px solid var(--color-border-subtle); margin-top: 18px; padding-top: 18px; }
+.totp-provision-grid { display: grid; grid-template-columns: minmax(180px, 240px) 1fr; gap: 20px; align-items: center; }
+.totp-qr-box { margin: 0; text-align: center; }
+.totp-qr-box img { display: block; width: min(220px, 100%); aspect-ratio: 1; object-fit: contain; margin: 0 auto 8px; background: white; border: 1px solid var(--color-border-subtle); border-radius: 8px; }
+.totp-qr-box figcaption { color: var(--color-text-muted); font-size: 12px; }
+.totp-manual-box label, .totp-confirm-form > label { display: block; font-weight: 600; margin-bottom: 8px; }
+.totp-secret-row { display: flex; gap: 8px; }
+.totp-secret-row input { min-width: 0; flex: 1; font-family: var(--font-mono); letter-spacing: .04em; }
+.totp-confirm-form { margin-top: 18px; }
+.totp-confirm-form input { max-width: 260px; font-family: var(--font-mono); font-size: 20px; letter-spacing: .3em; text-align: center; }
+@media (max-width: 580px) { .totp-provision-grid { grid-template-columns: 1fr; } .totp-qr-box img { width: 190px; } .totp-modal-card { padding: 20px; } }
+
 .lock-screen {
   min-height: 100vh;
   display: flex;

@@ -181,6 +181,22 @@ impl Vault {
         Ok(())
     }
 
+    pub fn unlock_with_totp(&self, totp: &crate::totp::Totp, code:&str) -> Result<()> {
+        totp.verify(code)?;
+        let dek=totp.unwrap_dek()?;
+        self.unlock_with_dek(&dek)
+    }
+
+    pub fn unlock_with_master_password(&self, master_password: &str) -> Result<()> {
+        self.unlock(master_password)
+    }
+
+    pub fn unlock_with_dek(&self, dek: &[u8]) -> Result<()> {
+        if dek.len()!=DEK_LEN{return Err(ConnectorError::internal("corrupt DEK length"));}
+        let mut dek_arr=Zeroizing::new([0u8;32]);dek_arr.copy_from_slice(dek);
+        *self.unlocked.lock().unwrap_or_else(|p|p.into_inner())=Some(Unlocked{dek:dek_arr});Ok(())
+    }
+
     /// Forget the in-memory DEK.
     pub fn lock(&self) {
         *self.unlocked.lock().unwrap_or_else(|p| p.into_inner()) = None;
@@ -195,8 +211,12 @@ impl Vault {
         }
     }
 
-    /// Verify a master password without changing unlock state (for reveal gate).
-    pub fn verify_master_password(&self, master_password: &str) -> Result<()> {
+    pub fn current_dek(&self) -> Result<Zeroizing<[u8;32]>> {
+        let guard=self.unlocked.lock().unwrap_or_else(|p|p.into_inner());
+        guard.as_ref().map(|u|Zeroizing::new(*u.dek)).ok_or_else(ConnectorError::locked)
+    }
+
+    pub fn verify_master_password(&self, master_password: &str) -> Result<Zeroizing<[u8;32]>> {
         let (salt, dek_wrapped): (Vec<u8>, Vec<u8>) = {
             let conn = self.lock_conn();
             conn.query_row(
@@ -206,8 +226,9 @@ impl Vault {
             )?
         };
         let kek = derive_kek(master_password, &salt)?;
-        open(&kek, &dek_wrapped)?;
-        Ok(())
+        let dek=open(&kek, &dek_wrapped)?;
+        if dek.len()!=DEK_LEN{return Err(ConnectorError::internal("corrupt DEK length"));}
+        let mut out=Zeroizing::new([0u8;32]);out.copy_from_slice(&dek);Ok(out)
     }
 
     fn gen_id() -> Result<String> {

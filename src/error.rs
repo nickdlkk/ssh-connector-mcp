@@ -17,6 +17,8 @@ pub enum ErrorCode {
     VaultBadPassword,
     /// Vault is already initialized (cannot re-init without reset).
     VaultAlreadyInit,
+    /// TOTP seed or independent wrapping key is unavailable.
+    TotpUnavailable,
     /// Requested host id does not exist.
     HostNotFound,
     /// SSH authentication failed at the final hop.
@@ -57,7 +59,7 @@ pub enum ErrorCode {
     JumpServerApiError,
     /// Direct one-shot exec is forbidden for JumpServer-managed targets.
     JumpServerExecDenied,
-    /// Ordinary host connection, PTY, host editing, or SFTP is forbidden for JumpServer targets.
+    /// Ordinary host connection or PTY opening is forbidden for JumpServer targets.
     JumpServerSessionRequired,
 }
 
@@ -67,6 +69,7 @@ impl ErrorCode {
             ErrorCode::VaultLocked => "vault_locked",
             ErrorCode::VaultBadPassword => "vault_bad_password",
             ErrorCode::VaultAlreadyInit => "vault_already_init",
+            ErrorCode::TotpUnavailable => "totp_unavailable",
             ErrorCode::HostNotFound => "host_not_found",
             ErrorCode::AuthFailed => "auth_failed",
             ErrorCode::SshConnectFailed => "ssh_connect_failed",

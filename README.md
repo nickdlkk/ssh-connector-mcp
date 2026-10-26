@@ -31,6 +31,7 @@ SSH Connector MCP separates these responsibilities:
 ## Features
 
 - **AI-safe credential boundary**: passwords and private keys are encrypted at rest with a master password; MCP tools never return stored secrets.
+- **Optional Vault TOTP unlock**: The Web security settings provide a locally generated QR code or a copyable text secret, a six-digit code confirmation form, and rebind/disable actions gated by a fresh master-password challenge. The Vault can then be unlocked in Web or by `vault_unlock_totp` using RFC 6238 codes. Ask the user for the current code; never guess or auto-retry. Back up the independent root-only `totp.key` together with `vault.db`; missing keys fail closed. TOTP is not SSH login MFA or remote user authentication; the master password remains a recovery path.
 - **Loopback-only service**: Web UI and Streamable HTTP MCP bind to `127.0.0.1` by design.
 - **Short commands done safely**: `exec` supports `argv` with POSIX quoting, `script` for multi-line jobs, and `raw` only when you intentionally own shell quoting.
 - **Persistent interactive sessions**: open PTY sessions, send text/keys, read structured screen snapshots, resize, and close.
@@ -48,7 +49,7 @@ SSH Connector MCP separates these responsibilities:
 The recommended production shape is a local daemon plus a Streamable HTTP MCP endpoint:
 
 ```bash
-cargo install --git https://github.com/nickdlkk/ssh-connector-mcp --tag v0.1.2 ssh-connector --locked
+cargo install --git https://github.com/nickdlkk/ssh-connector-mcp --tag v0.1.4 ssh-connector --locked
 ssh-connector --data-dir ~/.ssh-connector
 ```
 
@@ -66,8 +67,15 @@ extract `ssh-connector.exe`, and run:
 
 Use the accompanying `SHA256SUMS` file to verify the downloaded archive.
 The release workflow is defined in `.github/workflows/release.yml` and runs
-when a `v*.*.*` tag is pushed. Release v0.1.2 adds a local SQLite audit store with
-rolling seven-day UTC retention, legacy JSONL import (source files retained),
+when a `v*.*.*` tag is pushed. Release v0.1.4 adds JumpServer KoKo SFTP tools
+for listing, reading, writing, and streaming file transfers; the
+`jumpserver_search_asset_accounts` tool searches by machine-name/FQDN/IP
+fragment and returns matching host/account metadata in one call. It also
+strengthens JumpServer execution policy enforcement and includes the existing
+Vault TOTP/UI/security changes. See the bilingual docs below for scope; account
+credentials are never returned.
+
+Release v0.1.2 adds a local SQLite audit store with
 query filters/sorting/cursor pagination, and bounded secret redaction. MCP and
 Web API calls are audited at their handler boundary; raw WebSocket frames are
 not stored. See [docs/audit-sqlite.md](docs/audit-sqlite.md).
@@ -232,9 +240,14 @@ Security properties:
 | `session_send_text`, `session_send_key` | Drive PTY input. |
 | `session_screen`, `session_read` | Inspect PTY screen or incremental output. |
 | `session_resize`, `session_close`, `session_list` | Manage live PTY sessions. |
-| `sftp_list`, `sftp_get`, `sftp_put` | Transfer UTF-8 text files over SFTP. |
-| `sftp_download_file`, `sftp_upload_file` | Stream large binary files by local path with parent creation, overwrite control, temporary-file commit, cleanup, and SHA-256 verification. |
-| `sftp_get_base64`, `sftp_put_base64` | Transfer small binary payloads as base64 when the content safely fits in MCP context. |
+| `jumpserver_asset_list`, `jumpserver_asset_accounts` | Discover visible JumpServer assets or list non-secret accounts for a known asset ID. |
+| `jumpserver_search_asset_accounts` | Search assets by machine-name/FQDN/IP substring and return matching asset metadata plus account metadata in one call. |
+| `jumpserver_session_open` | Open a persistent PTY for a JumpServer asset/account; reuse its session ID. |
+| `jumpserver_sftp_list`, `jumpserver_sftp_get`, `jumpserver_sftp_put`, `jumpserver_sftp_put_base64` | Use the KoKo SFTP subsystem for directory listing and small text/binary files. |
+| `jumpserver_sftp_download_file`, `jumpserver_sftp_upload_file` | Stream files between an authorized JumpServer asset and a local path, with overwrite controls and optional SHA-256 verification. |
+| `sftp_list`, `sftp_get`, `sftp_put` | Transfer UTF-8 text files over ordinary SSH SFTP; not for JumpServer-managed targets. |
+| `sftp_download_file`, `sftp_upload_file` | Stream large binary files over ordinary SSH SFTP with overwrite control and SHA-256 verification. |
+| `sftp_get_base64`, `sftp_put_base64` | Transfer small binary payloads over ordinary SSH SFTP when content safely fits in MCP context. |
 
 ## Host Credential Shapes
 
@@ -381,7 +394,9 @@ Result shape:
 
 ## JumpServer execution policy
 
-For recognized JumpServer-managed targets, the daemon rejects one-shot `exec`, ordinary host connection/PTY tools, and all SFTP tools before the connection pool or file-transfer path is reached. Target detection covers API-discovered `jms:` IDs, the configured KoKo endpoint, and recursive SSH jump chains resolved by host ID or alias; Vault read/decryption errors fail closed. Discover assets/accounts through the JumpServer API, open one `jumpserver_session_open` PTY, and reuse its `session_id` with session tools. Policy errors include a stable business code in MCP structured error data. Ordinary SSH hosts retain normal `exec` and SFTP behavior.
+For asset/account discovery, `jumpserver_search_asset_accounts` accepts a case-insensitive machine-name, FQDN, or IP substring and returns matching asset metadata plus account names/usernames and non-secret metadata in one MCP call. It is a convenience search over the assets visible to the configured JumpServer API principal, not an unrestricted global search. Ordinary host-based operations remain blocked for JumpServer-managed targets; use the dedicated JumpServer tools. Do not return credentials.
+
+For recognized JumpServer-managed targets, the daemon rejects ordinary host-based `exec`, PTY, and SFTP operations before the connection pool or file-transfer path is reached. For file operations, discover assets/accounts through the JumpServer API and use the dedicated `jumpserver_sftp_*` MCP tools; they resolve the authorized account and access KoKo's SFTP subsystem. Do not pass JumpServer asset IDs to ordinary `host_id` SFTP tools. Direct command/PTY work remains on the one `jumpserver_session_open` path and should reuse its `session_id`. Policy errors include a stable business code in MCP structured error data. Ordinary SSH hosts retain normal `exec` and SFTP behavior.
 
 ## SFTP Payloads
 

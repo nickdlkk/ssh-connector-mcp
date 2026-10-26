@@ -11,13 +11,13 @@
 //!   stdio MCP can reach a already-running daemon.
 
 use crate::error::ConnectorError;
+use crate::jumpserver::{Account, Asset};
 use crate::state::AppState;
 use crate::types::{ExecPayload, HostSpec, KeyName};
-use crate::jumpserver::{Account, Asset};
 use base64::Engine;
 use rmcp::handler::server::router::tool::ToolRouter;
-use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::handler::server::tool::ToolCallContext;
+use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{CallToolResult, JsonObject, ServerCapabilities, ServerInfo};
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
@@ -27,7 +27,7 @@ use serde_json::{Map, Value};
 use std::sync::Arc;
 
 const SERVER_INSTRUCTIONS: &str = "SSH maintenance connector. When the user asks to operate SSH hosts, remote Linux \
-machines, VPS instances, or server-side files and commands that are available in this connector, prefer these MCP tools over spawning local `ssh`, `scp`, or `sftp` shell commands. Start with `host_list` to discover configured hosts and connection state. When JumpServer API is configured, use `jumpserver_asset_list` to discover authorized assets, then call `jumpserver_session_open` once for a persistent PTY and reuse its session_id for the full operation. Direct `exec`, ordinary `host_connect`, `session_open`/`session_open_root`, and SFTP operations are forbidden for recognized JumpServer-managed targets before network or file-transfer side effects; policy errors carry stable business codes. Do not manually add a host for each JumpServer asset or use a direct connection as a fallback. Use `host_connect` only for explicit checks of persisted hosts. JumpServer errors are structured: HTTP 401 means credentials/signature may be expired/revoked/invalid or system clock may be skewed; HTTP 403 means permission/org scope may be insufficient; HTTP 404 is NOT evidence of expired authorization and can mean an asset/account binding, visibility, or API route/version problem. For 404, refresh the asset list once and compare one known control asset; preserve status/endpoint, do not guess IDs, loop retries, or fall back to direct SSH. Ask a JumpServer administrator to verify API credentials, organization and the asset's account binding. Hosts and credentials are managed by a human via the Web UI or config-file provider; credentials are never returned. Use `exec` only for isolated one-shot commands on ordinary SSH hosts, `script` for multi-line non-interactive work on ordinary SSH hosts, `raw` only when you intentionally own shell quoting, `session_open` for stateful work on ordinary hosts, `session_open_root` for configured su escalation on ordinary hosts, and SFTP tools for file transfer.";
+machines, VPS instances, or server-side files and commands that are available in this connector, prefer these MCP tools over spawning local `ssh`, `scp`, or `sftp` shell commands. Start with `host_list` to discover configured hosts and connection state. For JumpServer asset/account lookup, use `jumpserver_search_asset_accounts` with a machine-name/FQDN/IP fragment to return matching host metadata and non-secret accounts in one call. Use `jumpserver_asset_list` and `jumpserver_asset_accounts` when you need separate discovery steps or the full inventory. For file operations, pass the discovered `asset_id` and authorized `account_id` to the JumpServer-specific `jumpserver_sftp_*` tools, which use KoKo's SFTP subsystem. These tools resolve the asset/account through the configured JumpServer API and must not use ordinary `host_id` SFTP tools for JumpServer targets. Direct `exec` and ordinary `session_open`/`session_open_root` are forbidden for recognized JumpServer-managed targets; they return `jumpserver_exec_denied` before making an SSH connection. Do not manually add a host for each JumpServer asset or use a direct connection as a fallback. Use `host_connect` only for explicit checks of persisted hosts. JumpServer errors are structured: HTTP 401 means credentials/signature may be expired/revoked/invalid or system clock may be skewed; HTTP 403 means permission/org scope may be insufficient; HTTP 404 is NOT evidence of expired authorization and can mean an asset/account binding, visibility, or API route/version problem. For 404, refresh the asset list once and compare one known control asset; preserve status/endpoint, do not guess IDs, loop retries, or fall back to direct SSH. Ask a JumpServer administrator to verify API credentials, organization and the asset's account binding. Hosts and credentials are managed by a human via the Web UI or config-file provider; credentials are never returned. Use `exec` only for isolated one-shot commands on ordinary SSH hosts, `script` for multi-line non-interactive work on ordinary SSH hosts, `raw` only when you intentionally own shell quoting, `session_open` for stateful work on ordinary hosts, `session_open_root` for configured su escalation on ordinary hosts, and SFTP tools for file transfer.";
 
 fn err_to_mcp(e: ConnectorError) -> ErrorData {
     // Surface our structured error code + context as MCP error data so the AI
@@ -52,6 +52,11 @@ fn err_to_mcp(e: ConnectorError) -> ErrorData {
 }
 
 // --- Tool request types (AI-facing input schemas) ---
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TotpUnlockRequest {
+    pub code: String,
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AddHostRequest {
@@ -121,6 +126,61 @@ fn exec_payload_from_request(req: ExecRequest) -> Result<NormalizedExecRequest, 
         host_id: req.host_id,
         payload,
     })
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JumpServerSftpRequest {
+    pub asset_id: String,
+    pub account_id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JumpServerSftpPutRequest {
+    pub asset_id: String,
+    pub account_id: String,
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JumpServerSftpPutBase64Request {
+    pub asset_id: String,
+    pub account_id: String,
+    pub path: String,
+    pub content_base64: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JumpServerSftpDownloadRequest {
+    pub asset_id: String,
+    pub account_id: String,
+    pub remote_path: String,
+    pub local_path: String,
+    #[serde(default)]
+    pub overwrite: bool,
+    #[serde(default = "default_true")]
+    pub create_parent_dirs: bool,
+    #[serde(default = "default_transfer_chunk_size")]
+    pub chunk_size_bytes: usize,
+    #[serde(default = "default_true")]
+    pub verify_sha256: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JumpServerSftpUploadRequest {
+    pub asset_id: String,
+    pub account_id: String,
+    pub local_path: String,
+    pub remote_path: String,
+    #[serde(default)]
+    pub overwrite: bool,
+    #[serde(default = "default_true")]
+    pub create_parent_dirs: bool,
+    #[serde(default = "default_transfer_chunk_size")]
+    pub chunk_size_bytes: usize,
+    #[serde(default = "default_true")]
+    pub verify_sha256: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -287,9 +347,40 @@ pub struct JumpServerAccountListResult {
     pub accounts: Vec<Account>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct JumpServerAccountSearchItem {
+    pub id: String,
+    pub name: Option<String>,
+    pub username: Option<String>,
+    pub privileged: Option<bool>,
+    pub secret_type: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct JumpServerAssetAccountSearchResult {
+    pub asset_id: String,
+    pub name: String,
+    pub address: String,
+    pub platform: Option<serde_json::Value>,
+    pub protocols: Vec<crate::jumpserver::Protocol>,
+    pub accounts: Vec<JumpServerAccountSearchItem>,
+    pub account_lookup_error: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JumpServerAssetSearchRequest {
+    /// Case-insensitive substring to match against asset name or address (hostname/FQDN/IP).
+    pub query: String,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct JumpServerAssetAccountsRequest {
     pub asset_id: String,
+}
+
+#[derive(Debug, serde::Serialize, JsonSchema)]
+pub struct JumpServerAccountSearchResult {
+    pub matches: Vec<JumpServerAssetAccountSearchResult>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -492,6 +583,20 @@ fn merge_variants_into_object(
 #[tool_router]
 impl McpServer {
     #[tool(
+        description = "Unlock the Vault with a human-provided current 6-digit TOTP code. Ask the user for the code first; never guess, retry automatically, or repeat the code. The code is not retained in audit records."
+    )]
+    async fn vault_unlock_totp(
+        &self,
+        Parameters(req): Parameters<TotpUnlockRequest>,
+    ) -> Result<Json<OkResult>, ErrorData> {
+        self.state
+            .vault
+            .unlock_with_totp(&self.state.totp, &req.code)
+            .map_err(|_| ErrorData::invalid_params("invalid code", None))?;
+        Ok(Json(OkResult { ok: true }))
+    }
+
+    #[tool(
         description = "List all configured hosts with connection status. Returns redacted summaries only — never credentials."
     )]
     async fn host_list(&self) -> Result<Json<HostListResult>, ErrorData> {
@@ -517,6 +622,13 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<UpdateHostRequest>,
     ) -> Result<Json<OkResult>, ErrorData> {
+        if self
+            .state
+            .is_jumpserver_target(&req.host_id)
+            .map_err(err_to_mcp)?
+        {
+            return Err(err_to_mcp(crate::state::jumpserver_session_required()));
+        }
         self.state
             .update_host(&req.host_id, req.spec)
             .map_err(err_to_mcp)?;
@@ -528,6 +640,13 @@ impl McpServer {
         &self,
         Parameters(req): Parameters<HostIdRequest>,
     ) -> Result<Json<OkResult>, ErrorData> {
+        if self
+            .state
+            .is_jumpserver_target(&req.host_id)
+            .map_err(err_to_mcp)?
+        {
+            return Err(err_to_mcp(crate::state::jumpserver_session_required()));
+        }
         self.state
             .remove_host(&req.host_id)
             .await
@@ -583,27 +702,83 @@ impl McpServer {
         Ok(Json(r))
     }
 
-    #[tool(description = "List assets available from the configured JumpServer API. Returns metadata only; no credentials or secrets.")]
+    #[tool(
+        description = "List assets available from the configured JumpServer API. Returns metadata only; no credentials or secrets."
+    )]
     async fn jumpserver_asset_list(&self) -> Result<Json<JumpServerAssetListResult>, ErrorData> {
         let assets = self.state.jumpserver_assets().await.map_err(err_to_mcp)?;
         Ok(Json(JumpServerAssetListResult { assets }))
     }
 
-    #[tool(description = "List JumpServer-managed accounts for an asset discovered by jumpserver_asset_list. Returns account metadata only; credentials are never returned.")]
+    #[tool(
+        description = "Search JumpServer assets by case-insensitive substring of machine name or address (hostname/FQDN/IP), and return each matching host's non-secret account metadata in one call."
+    )]
+    async fn jumpserver_search_asset_accounts(
+        &self,
+        Parameters(req): Parameters<JumpServerAssetSearchRequest>,
+    ) -> Result<Json<JumpServerAccountSearchResult>, ErrorData> {
+        let query = req.query.trim();
+        if query.is_empty() {
+            return Err(ErrorData::invalid_params("query must not be empty", None));
+        }
+        let assets = self.state.jumpserver_assets().await.map_err(err_to_mcp)?;
+        let matches: Vec<_> = assets
+            .into_iter()
+            .filter(|asset| asset.name.to_lowercase().contains(&query.to_lowercase())
+                || asset.address.to_lowercase().contains(&query.to_lowercase()))
+            .map(|asset| async move {
+                let (accounts, account_lookup_error) = match self.state.jumpserver_accounts(&asset.id).await {
+                    Ok(accounts) => (accounts.into_iter().map(|account| JumpServerAccountSearchItem {
+                        id: account.id,
+                        name: account.name,
+                        username: account.username,
+                        privileged: account.privileged,
+                        secret_type: account.secret_type,
+                    }).collect(), None),
+                    Err(error) => (Vec::new(), Some(format!("{}: {}", error.code.as_str(), error.message))),
+                };
+                JumpServerAssetAccountSearchResult {
+                    asset_id: asset.id,
+                    name: asset.name,
+                    address: asset.address,
+                    platform: asset.platform,
+                    protocols: asset.protocols,
+                    accounts,
+                    account_lookup_error,
+                }
+            })
+            .collect::<Vec<_>>();
+        let matches = futures_util::future::join_all(matches).await;
+        Ok(Json(JumpServerAccountSearchResult { matches }))
+    }
+
+    #[tool(
+        description = "List JumpServer-managed accounts for an asset discovered by jumpserver_asset_list. Returns account metadata only; credentials are never returned."
+    )]
     async fn jumpserver_asset_accounts(
         &self,
         Parameters(req): Parameters<JumpServerAssetAccountsRequest>,
     ) -> Result<Json<JumpServerAccountListResult>, ErrorData> {
-        let accounts = self.state.jumpserver_accounts(&req.asset_id).await.map_err(err_to_mcp)?;
+        let accounts = self
+            .state
+            .jumpserver_accounts(&req.asset_id)
+            .await
+            .map_err(err_to_mcp)?;
         Ok(Json(JumpServerAccountListResult { accounts }))
     }
 
-    #[tool(description = "Open a persistent PTY through JumpServer for an API-discovered asset/account. This is the supported way to access JumpServer-managed assets; direct exec and ordinary host connection/PTY/SFTP paths are rejected. Reuse the returned session_id with session tools; do not open a new session for each command.")]
+    #[tool(
+        description = "Open a persistent PTY through JumpServer for an API-discovered asset/account. This is the supported way to access JumpServer-managed targets; direct exec and ordinary session_open are denied for those targets. Reuse the returned session_id with session_send_text, session_read, session_exec, and other session tools; do not open a new session for each command."
+    )]
     async fn jumpserver_session_open(
         &self,
         Parameters(req): Parameters<JumpServerSessionOpenRequest>,
     ) -> Result<Json<crate::types::SessionInfo>, ErrorData> {
-        let info = self.state.jumpserver_asset_session(&req.asset_id, &req.account_id, req.rows, req.cols).await.map_err(err_to_mcp)?;
+        let info = self
+            .state
+            .jumpserver_asset_session(&req.asset_id, &req.account_id, req.rows, req.cols)
+            .await
+            .map_err(err_to_mcp)?;
         Ok(Json(info))
     }
 
@@ -651,12 +826,22 @@ impl McpServer {
         Parameters(req): Parameters<SessionExecRequest>,
     ) -> Result<Json<crate::types::SessionExecResult>, ErrorData> {
         if req.wait_ms.is_some_and(|n| n > 300_000) {
-            return Err(ErrorData::invalid_params("wait_ms must be at most 300000", None));
+            return Err(ErrorData::invalid_params(
+                "wait_ms must be at most 300000",
+                None,
+            ));
         }
         if req.max_output_bytes == Some(0) || req.max_output_bytes.is_some_and(|n| n > 1_048_576) {
-            return Err(ErrorData::invalid_params("max_output_bytes must be between 1 and 1048576", None));
+            return Err(ErrorData::invalid_params(
+                "max_output_bytes must be between 1 and 1048576",
+                None,
+            ));
         }
-        let result = self.state.pty_exec(&req.session_id, &req.raw, req.wait_ms, req.max_output_bytes).await.map_err(err_to_mcp)?;
+        let result = self
+            .state
+            .pty_exec(&req.session_id, &req.raw, req.wait_ms, req.max_output_bytes)
+            .await
+            .map_err(err_to_mcp)?;
         Ok(Json(result))
     }
 
@@ -668,9 +853,16 @@ impl McpServer {
         Parameters(req): Parameters<SessionExecReadRequest>,
     ) -> Result<Json<crate::types::SessionExecResult>, ErrorData> {
         if req.wait_ms.is_some_and(|n| n > 300_000) {
-            return Err(ErrorData::invalid_params("wait_ms must be at most 300000", None));
+            return Err(ErrorData::invalid_params(
+                "wait_ms must be at most 300000",
+                None,
+            ));
         }
-        let result = self.state.pty_exec_read(&req.session_id, &req.token, req.wait_ms).await.map_err(err_to_mcp)?;
+        let result = self
+            .state
+            .pty_exec_read(&req.session_id, &req.token, req.wait_ms)
+            .await
+            .map_err(err_to_mcp)?;
         Ok(Json(result))
     }
 
@@ -754,6 +946,44 @@ impl McpServer {
             .await
             .map_err(err_to_mcp)?;
         Ok(Json(OkResult { ok: true }))
+    }
+
+    #[tool(description = "List files in an authorized JumpServer asset directory via KoKo SFTP. Requires asset_id/account_id from the JumpServer API discovery tools.")]
+    async fn jumpserver_sftp_list(&self, Parameters(req): Parameters<JumpServerSftpRequest>) -> Result<Json<SftpListResult>, ErrorData> {
+        let entries = self.state.jumpserver_sftp_list(&req.asset_id, &req.account_id, &req.path).await.map_err(err_to_mcp)?;
+        Ok(Json(SftpListResult { entries }))
+    }
+
+    #[tool(description = "Read a UTF-8 text file from an authorized JumpServer asset via KoKo SFTP.")]
+    async fn jumpserver_sftp_get(&self, Parameters(req): Parameters<JumpServerSftpRequest>) -> Result<Json<SftpGetResult>, ErrorData> {
+        let bytes = self.state.jumpserver_sftp_get(&req.asset_id, &req.account_id, &req.path).await.map_err(err_to_mcp)?;
+        let (content, had_invalid_utf8) = match std::str::from_utf8(&bytes) { Ok(s) => (s.to_string(), false), Err(_) => (String::from_utf8_lossy(&bytes).into_owned(), true) };
+        Ok(Json(SftpGetResult { content, bytes: bytes.len(), had_invalid_utf8 }))
+    }
+
+    #[tool(description = "Write a UTF-8 text file to an authorized JumpServer asset via KoKo SFTP; overwrites the destination.")]
+    async fn jumpserver_sftp_put(&self, Parameters(req): Parameters<JumpServerSftpPutRequest>) -> Result<Json<OkResult>, ErrorData> {
+        self.state.jumpserver_sftp_put(&req.asset_id, &req.account_id, &req.path, req.content.as_bytes()).await.map_err(err_to_mcp)?;
+        Ok(Json(OkResult { ok: true }))
+    }
+
+    #[tool(description = "Upload a small binary file to an authorized JumpServer asset via KoKo SFTP using base64; overwrites the destination.")]
+    async fn jumpserver_sftp_put_base64(&self, Parameters(req): Parameters<JumpServerSftpPutBase64Request>) -> Result<Json<OkResult>, ErrorData> {
+        let bytes = base64::engine::general_purpose::STANDARD.decode(req.content_base64.as_bytes()).map_err(|e| ErrorData::invalid_params(format!("invalid base64 content: {e}"), None))?;
+        self.state.jumpserver_sftp_put(&req.asset_id, &req.account_id, &req.path, &bytes).await.map_err(err_to_mcp)?;
+        Ok(Json(OkResult { ok: true }))
+    }
+
+    #[tool(description = "Download a file from an authorized JumpServer asset via KoKo SFTP to a local path. Uses streaming chunks, SHA-256 verification, and the local path safety restrictions.")]
+    async fn jumpserver_sftp_download_file(&self, Parameters(req): Parameters<JumpServerSftpDownloadRequest>) -> Result<Json<SftpFileTransferResult>, ErrorData> {
+        let r = self.state.jumpserver_sftp_download_file(&req.asset_id, &req.account_id, &req.remote_path, &req.local_path, req.overwrite, req.create_parent_dirs, req.chunk_size_bytes, req.verify_sha256).await.map_err(err_to_mcp)?;
+        Ok(Json(SftpFileTransferResult { local_path: r.local_path.display().to_string(), remote_path: r.remote_path, bytes: r.bytes, sha256: r.sha256, verified: r.verified }))
+    }
+
+    #[tool(description = "Upload a local file to an authorized JumpServer asset via KoKo SFTP. Uses streaming chunks, SHA-256 verification, remote temporary-file commit, and overwrite safety controls.")]
+    async fn jumpserver_sftp_upload_file(&self, Parameters(req): Parameters<JumpServerSftpUploadRequest>) -> Result<Json<SftpFileTransferResult>, ErrorData> {
+        let r = self.state.jumpserver_sftp_upload_file(&req.asset_id, &req.account_id, &req.local_path, &req.remote_path, req.overwrite, req.create_parent_dirs, req.chunk_size_bytes, req.verify_sha256).await.map_err(err_to_mcp)?;
+        Ok(Json(SftpFileTransferResult { local_path: r.local_path.display().to_string(), remote_path: r.remote_path, bytes: r.bytes, sha256: r.sha256, verified: r.verified }))
     }
 
     #[tool(description = "List a remote directory over SFTP.")]
@@ -907,27 +1137,61 @@ impl ServerHandler for McpServer {
     ) -> impl std::future::Future<Output = Result<CallToolResult, ErrorData>> + Send + '_ {
         async move {
             let method = request.name.to_string();
-            let input = crate::mcp_audit_policy::sanitize_input(Value::Object(request.arguments.clone().unwrap_or_default()));
+            let input = crate::mcp_audit_policy::sanitize_input(Value::Object(
+                request.arguments.clone().unwrap_or_default(),
+            ));
             let started = std::time::Instant::now();
             let input_copy = input.clone();
-            let result = self.tool_router.call(ToolCallContext::new(self, request, context)).await;
+            let result = self
+                .tool_router
+                .call(ToolCallContext::new(self, request, context))
+                .await;
             let elapsed = started.elapsed().as_millis() as i64;
             match result {
                 Ok(output) => {
-                    let output_value = Some(crate::mcp_audit_policy::sanitize_output(&serde_json::to_value(&output).unwrap_or(Value::Null), &method));
-            let audit_result = self.state.audit.try_record_fields(crate::audit::AuditLog::entry(&method), "mcp", input, output_value, Some(elapsed), None, None, None);
+                    let output_value = Some(crate::mcp_audit_policy::sanitize_output(
+                        &serde_json::to_value(&output).unwrap_or(Value::Null),
+                        &method,
+                    ));
+                    let audit_result = self.state.audit.try_record_fields(
+                        crate::audit::AuditLog::entry(&method),
+                        "mcp",
+                        input,
+                        output_value,
+                        Some(elapsed),
+                        None,
+                        None,
+                        None,
+                    );
                     if let Err(error) = audit_result {
                         tracing::error!(target:"audit",method=%method,"mandatory MCP audit failed: {error}");
-                        return Err(ErrorData::internal_error("audit unavailable".to_string(),None));
+                        return Err(ErrorData::internal_error(
+                            "audit unavailable".to_string(),
+                            None,
+                        ));
                     }
                     Ok(output)
                 }
                 Err(error) => {
-                    let code = error.data.as_ref().and_then(|data| data.get("code")).and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| error.code.0.to_string());
-                    let audit_result = self.state.audit.try_record_fields(crate::audit::AuditLog::entry(&method), "mcp", input_copy, Some(serde_json::json!({"error_code":code})), Some(elapsed), None, None, Some(&code));
+                    // Persist the stable public policy code, not Rust's Debug
+                    // spelling (for example `JumpServerExecDenied`).
+                    let code = error.data.as_ref().and_then(|d| d.get("code")).and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| error.code.0.to_string());
+                    let audit_result = self.state.audit.try_record_fields(
+                        crate::audit::AuditLog::entry(&method),
+                        "mcp",
+                        input_copy,
+                        Some(serde_json::json!({"error_code":code})),
+                        Some(elapsed),
+                        None,
+                        None,
+                        Some(&code),
+                    );
                     if let Err(audit_error) = audit_result {
                         tracing::error!(target:"audit",method=%method,"mandatory MCP audit failed for error response: {audit_error}");
-                        return Err(ErrorData::internal_error("audit unavailable".to_string(),None));
+                        return Err(ErrorData::internal_error(
+                            "audit unavailable".to_string(),
+                            None,
+                        ));
                     }
                     Err(error)
                 }
@@ -936,7 +1200,8 @@ impl ServerHandler for McpServer {
     }
 
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(SERVER_INSTRUCTIONS)
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions(SERVER_INSTRUCTIONS)
     }
 }
 
@@ -970,6 +1235,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn jumpserver_policy_error_keeps_stable_code_in_mcp_structured_data() {
+        for code in [
+            crate::error::ErrorCode::JumpServerExecDenied,
+            crate::error::ErrorCode::JumpServerSessionRequired,
+        ] {
+            let error = ConnectorError::new(code, "policy rejected");
+            let mcp_error = err_to_mcp(error);
+            assert_eq!(mcp_error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            assert_eq!(
+                mcp_error.data.as_ref().and_then(|data| data.get("code")).and_then(Value::as_str),
+                Some(code.as_str())
+            );
+        }
+    }
+
+    #[test]
     fn ai_tool_surface_has_transfers_but_no_credential_reveal() {
         let router = McpServer::tool_router();
         let names: Vec<String> = router
@@ -979,10 +1260,35 @@ mod tests {
             .collect();
         assert!(names.iter().any(|name| name == "sftp_download_file"));
         assert!(names.iter().any(|name| name == "sftp_upload_file"));
+        assert!(names.iter().any(|name| name == "jumpserver_sftp_list"));
+        assert!(names.iter().any(|name| name == "jumpserver_sftp_get"));
+        assert!(names.iter().any(|name| name == "jumpserver_sftp_put"));
+        assert!(names.iter().any(|name| name == "jumpserver_sftp_put_base64"));
+        assert!(names.iter().any(|name| name == "jumpserver_sftp_download_file"));
+        assert!(names.iter().any(|name| name == "jumpserver_sftp_upload_file"));
+        assert!(names.iter().any(|name| name == "jumpserver_search_asset_accounts"));
         assert!(names.iter().any(|name| name == "session_exec"));
         assert!(names.iter().any(|name| name == "session_exec_read"));
+        assert!(names.iter().any(|name| name == "vault_unlock_totp"));
         assert!(!names.iter().any(|name| name.contains("reveal")));
         assert!(!names.iter().any(|name| name.contains("credential_get")));
+    }
+
+    #[test]
+    fn totp_request_schema_requires_six_digit_code() {
+        let mut router = McpServer::tool_router();
+        sanitize_tool_schemas_for_ai_clients(&mut router);
+        let tool = router.get("vault_unlock_totp").unwrap();
+        let props = tool.input_schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("code"));
+        assert!(
+            tool.input_schema["required"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|v| v == "code"))
+        );
+        let desc = tool.description.as_deref().unwrap_or_default();
+        assert!(desc.contains("Ask the user"));
+        assert!(desc.contains("never guess"));
     }
 
     #[test]
@@ -1006,33 +1312,21 @@ mod tests {
         assert!(SERVER_INSTRUCTIONS.contains("HTTP 401"));
         assert!(SERVER_INSTRUCTIONS.contains("HTTP 404 is NOT evidence of expired authorization"));
         assert!(SERVER_INSTRUCTIONS.contains("do not guess IDs"));
-    }
-
-    #[test]
-    fn jumpserver_policy_error_keeps_stable_business_code_in_mcp_data() {
-        for code in [
-            crate::error::ErrorCode::JumpServerExecDenied,
-            crate::error::ErrorCode::JumpServerSessionRequired,
-        ] {
-            let error = err_to_mcp(ConnectorError::new(code, "blocked"));
-            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
-            assert_eq!(
-                error.data.as_ref().and_then(|value| value.get("code")).and_then(Value::as_str),
-                Some(code.as_str())
-            );
-        }
-    }
-
-    #[test]
-    fn jumpserver_descriptions_state_exec_policy_and_pty_reuse() {
         assert!(SERVER_INSTRUCTIONS.contains("Direct `exec`"));
-        assert!(SERVER_INSTRUCTIONS.contains("jumpserver_session_open` once"));
+        assert!(SERVER_INSTRUCTIONS.contains("Do not manually add a host for each JumpServer asset"));
+    }
+
+    #[test]
+    fn jumpserver_tool_descriptions_require_session_reuse() {
         let router = McpServer::tool_router();
-        let exec = router.get("exec").unwrap().description.as_deref().unwrap_or_default();
-        assert!(exec.contains("forbidden for JumpServer-managed targets"));
-        assert!(exec.contains("jumpserver_session_open"));
-        let open = router.get("jumpserver_session_open").unwrap().description.as_deref().unwrap_or_default().to_ascii_lowercase();
-        assert!(open.contains("reuse the returned session_id"));
-        assert!(open.contains("do not open a new session"));
+        let exec = router.get("exec").unwrap();
+        let exec_description = exec.description.as_deref().unwrap_or_default();
+        assert!(exec_description.contains("forbidden for JumpServer-managed targets"));
+        assert!(exec_description.contains("jumpserver_session_open"));
+
+        let open = router.get("jumpserver_session_open").unwrap();
+        let open_description = open.description.as_deref().unwrap_or_default().to_ascii_lowercase();
+        assert!(open_description.contains("reuse the returned session_id"));
+        assert!(open_description.contains("do not open a new session"));
     }
 }

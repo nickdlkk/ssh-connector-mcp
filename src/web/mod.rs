@@ -31,6 +31,14 @@ pub fn router(state: Shared, static_dir: std::path::PathBuf) -> Router {
         .route("/status", get(status))
         .route("/vault/init", post(vault_init))
         .route("/vault/unlock", post(vault_unlock))
+        .route("/vault/lock", post(vault_lock))
+        .route("/vault/totp/enroll/start", post(totp_enroll_start))
+        .route("/vault/totp/enroll/confirm", post(totp_enroll_confirm))
+        .route("/vault/totp/enroll/cancel", post(totp_enroll_cancel))
+        .route("/vault/totp/replace/start", post(totp_replace_start))
+        .route("/vault/totp/replace/confirm", post(totp_replace_confirm))
+        .route("/vault/totp/unlock", post(totp_unlock))
+        .route("/vault/totp/disable", post(totp_disable))
         .route("/hosts", get(get_hosts).post(add_host))
         .route("/jumpserver/assets", get(get_jumpserver_assets))
         .route("/jumpserver/assets/{asset_id}/accounts", get(get_jumpserver_accounts))
@@ -48,6 +56,7 @@ pub fn router(state: Shared, static_dir: std::path::PathBuf) -> Router {
     Router::new()
         .nest("/api", api)
         .fallback_service(ServeDir::new(static_dir).append_index_html_on_directories(true))
+        .layer(tower_http::trace::TraceLayer::new_for_http())
 }
 
 /// Map a ConnectorError to an HTTP status + JSON body the SPA understands.
@@ -125,8 +134,10 @@ async fn audit_web_boundary(
     };
     let response_json = serde_json::from_slice::<serde_json::Value>(&body_for_client).ok();
     let method_name = format!("{} {}", method.as_str(), route);
-    let audit_input = crate::mcp_audit_policy::sanitize_input(request_json);
-    let audit_output = if route == "audit" {
+    let audit_input = if route.starts_with("vault/totp/") || route == "vault/lock" { serde_json::json!({"redacted":true}) } else { crate::mcp_audit_policy::sanitize_input(request_json) };
+    let audit_output = if route.starts_with("vault/totp/") || route == "vault/lock" {
+        Some(serde_json::json!({"redacted":true,"http_status":status.as_u16()}))
+    } else if route == "audit" {
         response_json.as_ref().map(|value| serde_json::json!({"entry_count": value.get("entries").and_then(|entries|entries.as_array()).map_or(0, |entries|entries.len()), "has_next_cursor":value.get("next_cursor").is_some_and(|cursor|!cursor.is_null())}))
     } else {
         response_json.as_ref().map(|value| crate::mcp_audit_policy::sanitize_output(value, route))
@@ -143,6 +154,12 @@ async fn audit_web_boundary(
             tracing::error!(target:"audit", method=%method_name, "mandatory web audit failed: {error}");
             return (StatusCode::SERVICE_UNAVAILABLE, "audit unavailable").into_response();
         }
+        let mut parts = parts;
+        if route == "vault/totp/enroll/start" || route == "vault/totp/replace/start" {
+            parts.headers.insert(axum::http::header::CACHE_CONTROL, "no-store, max-age=0".parse().unwrap());
+            parts.headers.insert(axum::http::header::PRAGMA, "no-cache".parse().unwrap());
+            parts.headers.insert(axum::http::header::EXPIRES, "0".parse().unwrap());
+        }
         Response::from_parts(parts, axum::body::Body::from(body_for_client))
 }
 
@@ -154,6 +171,7 @@ async fn status(State(st): State<Shared>) -> ApiResult {
     Ok(Json(json!({
         "vault_initialized": st.vault.is_initialized().map_err(ApiError::from)?,
         "vault_unlocked": st.vault.is_unlocked(),
+        "totp_enabled": st.totp.enabled().map_err(ApiError::from)?,
         "version": env!("CARGO_PKG_VERSION"),
     })))
 }
@@ -171,6 +189,73 @@ async fn vault_init(State(st): State<Shared>, Json(req): Json<MasterPassword>) -
 async fn vault_unlock(State(st): State<Shared>, Json(req): Json<MasterPassword>) -> ApiResult {
     st.vault.unlock(&req.master_password).map_err(ApiError::from)?;
     Ok(Json(json!({ "ok": true })))
+}
+
+async fn vault_lock(State(st): State<Shared>) -> ApiResult {
+    st.vault.lock();
+    Ok(Json(json!({"ok":true})))
+}
+
+#[derive(Deserialize)]
+struct TotpCode { code: String }
+#[derive(Deserialize)]
+struct TotpEnrollStart { master_password: String }
+#[derive(Deserialize)]
+struct TotpEnrollConfirm { code: String, master_password: String }
+
+async fn totp_enroll_start(State(st): State<Shared>, Json(req): Json<TotpEnrollStart>) -> ApiResult {
+    if !st.vault.is_unlocked() { return Err(ApiError(ConnectorError::locked())); }
+    let dek=st.vault.verify_master_password(&req.master_password).map_err(ApiError::from)?;
+    let (secret, uri) = st.totp.start_enrollment(&dek).map_err(ApiError::from)?;
+    provisioning_response(secret, uri)
+}
+async fn totp_enroll_confirm(State(st): State<Shared>, Json(req): Json<TotpEnrollConfirm>) -> ApiResult {
+    if !st.vault.is_unlocked() { return Err(ApiError(ConnectorError::locked())); }
+    let dek=st.vault.verify_master_password(&req.master_password).map_err(ApiError::from)?;
+    st.totp.confirm_pending_mode(&req.code, &dek, false).map_err(totp_confirm_error)?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn totp_enroll_cancel(State(st): State<Shared>) -> ApiResult {
+    // Cancelling only discards an uncommitted pending enrollment; it never alters the active binding.
+    st.totp.cancel_pending();
+    Ok(Json(json!({"ok":true})))
+}
+async fn totp_replace_start(State(st): State<Shared>, Json(req): Json<TotpEnrollStart>) -> ApiResult {
+    if !st.vault.is_unlocked() { return Err(ApiError(ConnectorError::locked())); }
+    let dek=st.vault.verify_master_password(&req.master_password).map_err(|_|ApiError(ConnectorError::new(ErrorCode::VaultBadPassword,"secondary authentication failed")))?;
+    let (secret, uri)=st.totp.start_replacement(&dek).map_err(ApiError::from)?;
+    provisioning_response(secret, uri)
+}
+async fn totp_replace_confirm(State(st): State<Shared>, Json(req): Json<TotpEnrollConfirm>) -> ApiResult {
+    if !st.vault.is_unlocked() { return Err(ApiError(ConnectorError::locked())); }
+    let dek=st.vault.verify_master_password(&req.master_password).map_err(|_|ApiError(ConnectorError::new(ErrorCode::VaultBadPassword,"secondary authentication failed")))?;
+    st.totp.confirm_pending_mode(&req.code, &dek, true).map_err(totp_confirm_error)?;
+    Ok(Json(json!({"ok":true})))
+}
+fn totp_confirm_error(error: ConnectorError) -> ApiError {
+    if error.code == ErrorCode::VaultBadPassword {
+        ApiError(ConnectorError::new(ErrorCode::VaultBadPassword,"secondary authentication failed"))
+    } else { ApiError(error) }
+}
+
+fn provisioning_response(secret:String, uri:String)->ApiResult {
+    let qr=qrcode::QrCode::new(uri.as_bytes()).map_err(|_|ApiError(ConnectorError::internal("QR generation failed")))?;
+    let svg=qr.render::<qrcode::render::svg::Color>().build();
+    let svg_base64=base64::Engine::encode(&base64::engine::general_purpose::STANDARD,svg.as_bytes());
+    Ok(Json(json!({"secret":secret,"otpauth_uri":uri,"qr_svg_base64":svg_base64})))
+}
+async fn totp_unlock(State(st): State<Shared>, Json(req): Json<TotpCode>) -> ApiResult {
+    if st.totp.enabled().map_err(ApiError::from)? {
+        st.vault.unlock_with_totp(&st.totp, &req.code).map_err(|_| ApiError(ConnectorError::new(ErrorCode::VaultBadPassword,"invalid code")))?;
+    } else {
+        st.vault.unlock_with_master_password(&req.code).map_err(|_| ApiError(ConnectorError::new(ErrorCode::VaultBadPassword,"invalid code")))?;
+    }
+    Ok(Json(json!({"ok":true})))
+}
+async fn totp_disable(State(st): State<Shared>, Json(req): Json<MasterPassword>) -> ApiResult {
+    st.vault.verify_master_password(&req.master_password).map_err(ApiError::from)?;
+    st.totp.disable().map_err(ApiError::from)?;
+    Ok(Json(json!({"ok":true})))
 }
 
 // --- Hosts ---
@@ -343,7 +428,8 @@ async fn attach_socket(socket: WebSocket, st: Shared, session_id: String) {
 fn stable_route(path: &str) -> &str {
     let path = path.strip_prefix("/api").unwrap_or(path);
     const KNOWN: &[(&str, &str)] = &[
-        ("/status", "status"), ("/vault/init", "vault/init"), ("/vault/unlock", "vault/unlock"),
+        ("/status", "status"), ("/vault/init", "vault/init"), ("/vault/unlock", "vault/unlock"), ("/vault/lock", "vault/lock"),
+        ("/vault/totp/enroll/start", "vault/totp/enroll/start"), ("/vault/totp/enroll/confirm", "vault/totp/enroll/confirm"), ("/vault/totp/enroll/cancel", "vault/totp/enroll/cancel"), ("/vault/totp/replace/start", "vault/totp/replace/start"), ("/vault/totp/replace/confirm", "vault/totp/replace/confirm"), ("/vault/totp/unlock", "vault/totp/unlock"), ("/vault/totp/disable", "vault/totp/disable"),
         ("/hosts", "hosts"), ("/jumpserver/assets", "jumpserver/assets"), ("/audit", "audit"),
         ("/sessions", "sessions"),
     ];
@@ -371,6 +457,12 @@ mod web_audit_tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
+    #[test]
+    fn totp_route_is_stable() {
+        assert_eq!(stable_route("/api/vault/totp/unlock"), "vault/totp/unlock");
+        assert_eq!(stable_route("/api/vault/totp/enroll/start"), "vault/totp/enroll/start");
+    }
+
     fn test_state() -> (Shared, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("ssh-connector-web-audit-{}", time::OffsetDateTime::now_utc().unix_timestamp_nanos()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -378,7 +470,7 @@ mod web_audit_tests {
         vault.init("unit-test-only-master").unwrap();
         let audit = Arc::new(crate::audit::AuditLog::try_new(dir.join("audit")).unwrap());
         let config = Config::load_or_init(&dir).unwrap();
-        let state = AppState::new(vault, audit, config, "local-test-token".to_string()).unwrap();
+        let state = AppState::new(vault, audit, config, "local-test-token".to_string(), Arc::new(crate::totp::Totp::open(&dir.join("vault.db"), dir.join("totp.key")).unwrap())).unwrap();
         (state, dir)
     }
 
@@ -410,7 +502,7 @@ mod web_audit_tests {
         let vault = Arc::new(Vault::open(&dir.join("vault.db")).unwrap());
         let audit = state.audit.clone();
         let config = Config::load_or_init(&dir).unwrap();
-        let app_state = AppState::new(vault, audit.clone(), config, "local-test-token".into()).unwrap();
+        let app_state = AppState::new(vault, audit.clone(), config, "local-test-token".into(), Arc::new(crate::totp::Totp::open(&dir.join("vault.db"), dir.join("totp.key")).unwrap())).unwrap();
         let app = router(app_state.clone(), std::path::PathBuf::from("static"));
         let payload = serde_json::json!({"master_password":"no-store-this-password"});
         let response=app.oneshot(axum::http::Request::builder().method("POST").uri("/api/vault/init").header("content-type","application/json").body(axum::body::Body::from(payload.to_string())).unwrap()).await.unwrap();
@@ -439,7 +531,7 @@ mod web_limit_tests {
         let vault=Arc::new(Vault::open(&root.join("vault.db")).unwrap());
         let audit=Arc::new(crate::audit::AuditLog::try_new(root.join("audit")).unwrap());
         let config=Config::load_or_init(&root).unwrap();
-        let state=AppState::new(vault,audit.clone(),config,"token".into()).unwrap();
+        let state=AppState::new(vault,audit.clone(),config,"token".into(),Arc::new(crate::totp::Totp::open(&root.join("vault.db"),root.join("totp.key")).unwrap())).unwrap();
         let app=router(state.clone(),std::path::PathBuf::from("static"));
         let huge=vec![b' ';1_048_577];
         let response=app.oneshot(axum::http::Request::builder().method("POST").uri("/api/vault/init").header("content-type","application/json").body(axum::body::Body::from(huge)).unwrap()).await.unwrap();
@@ -468,7 +560,7 @@ mod web_audit_query_tests {
         let audit=Arc::new(crate::audit::AuditLog::try_new(root.join("audit")).unwrap());
         audit.try_record_fields(crate::audit::AuditLog::entry("alpha"),"mcp",serde_json::json!({}),Some(serde_json::json!({"ok":true})),None,None,None,None).unwrap();
         audit.try_record_fields(crate::audit::AuditLog::entry("beta"),"web_api",serde_json::json!({}),Some(serde_json::json!({"ok":true})),None,None,None,None).unwrap();
-        let state=AppState::new(vault,audit,Config::load_or_init(&root).unwrap(),"token".into()).unwrap();
+        let state=AppState::new(vault,audit,Config::load_or_init(&root).unwrap(),"token".into(),Arc::new(crate::totp::Totp::open(&root.join("vault.db"),root.join("totp.key")).unwrap())).unwrap();
         let app=router(state,std::path::PathBuf::from("static"));
         let response=app.oneshot(axum::http::Request::builder().uri("/api/audit?source=mcp&limit=1").body(axum::body::Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(),StatusCode::OK);
@@ -486,7 +578,7 @@ mod web_audit_query_tests {
         let vault=Arc::new(Vault::open(&root.join("vault.db")).unwrap());vault.init("unit-master").unwrap();
         let audit=Arc::new(crate::audit::AuditLog::try_new(root.join("audit")).unwrap());
         for method in ["alpha","beta","gamma"] { audit.try_record_fields(crate::audit::AuditLog::entry(method),"mcp",serde_json::json!({}),Some(serde_json::json!({"ok":true})),None,None,None,None).unwrap(); }
-        let state=AppState::new(vault,audit,Config::load_or_init(&root).unwrap(),"token".into()).unwrap();
+        let state=AppState::new(vault,audit,Config::load_or_init(&root).unwrap(),"token".into(),Arc::new(crate::totp::Totp::open(&root.join("vault.db"),root.join("totp.key")).unwrap())).unwrap();
         let app=router(state,std::path::PathBuf::from("static"));
         let response=app.oneshot(axum::http::Request::builder().uri("/api/audit?limit=50&methods=alpha&methods=gamma&source=mcp").body(axum::body::Body::empty()).unwrap()).await.unwrap();
         if response.status()!=StatusCode::OK { panic!("status={} body={}",response.status(),axum::body::to_bytes(response.into_body(),65536).await.unwrap().escape_ascii()); }
@@ -504,7 +596,7 @@ mod web_audit_query_tests {
         std::fs::create_dir_all(&root).unwrap();
         let vault=Arc::new(Vault::open(&root.join("vault.db")).unwrap());vault.init("unit-master").unwrap();
         let audit=Arc::new(crate::audit::AuditLog::try_new(root.join("audit")).unwrap());
-        let state=AppState::new(vault,audit,Config::load_or_init(&root).unwrap(),"token".into()).unwrap();
+        let state=AppState::new(vault,audit,Config::load_or_init(&root).unwrap(),"token".into(),Arc::new(crate::totp::Totp::open(&root.join("vault.db"),root.join("totp.key")).unwrap())).unwrap();
         let app=router(state,std::path::PathBuf::from("static"));
         let params=(0..33).map(|i|format!("methods=m{i}")).collect::<Vec<_>>().join("&");
         let response=app.oneshot(axum::http::Request::builder().uri(format!("/api/audit?{params}")).body(axum::body::Body::empty()).unwrap()).await.unwrap();
