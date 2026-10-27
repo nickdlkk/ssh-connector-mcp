@@ -1,6 +1,6 @@
 # SSH Connector MCP
 
-> **英文文档：** [README.zh-CN.md](README.zh-CN.md)
+> **英文文档：** [README.en.md](README.en.md)
 
 **面向 Codex、Claude Code、OpenClaw 和任意 MCP 客户端的 AI 安全 SSH 连接器。**
 
