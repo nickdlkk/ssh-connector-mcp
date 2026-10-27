@@ -239,24 +239,54 @@ Network: 127.0.0.1 only
 
 ## 工具列表
 
+MCP 工具按主机管理、会话、JumpServer、SFTP 和 Vault 安全功能分类。下面列出
+主要工具；Vault 安全设置也支持 TOTP 绑定、验证、换绑和解绑，详见后文。
+
+### 主机管理与会话
+
 | 工具 | 作用 |
 | --- | --- |
 | `host_list` | 列出配置主机、脱敏元数据和连接状态。 |
-- `host_add`, `host_update`, `host_remove` | 管理静态主机条目，凭据加密存储。JumpServer 资产不需要逐台添加。 |
+| `host_add`, `host_update`, `host_remove` | 管理静态主机条目，凭据加密存储。JumpServer 资产不需要逐台添加。 |
 | `host_connect`, `host_disconnect` | 显式建立或断开 SSH transport，并记录 TOFU host key。 |
 | `exec` | 运行一次性 `argv`、`script` 或 `raw` 命令，返回 stdout/stderr/exit code。 |
 | `session_open`, `session_open_root` | 打开持久交互式 PTY 会话，可自动执行 `su -` 转 root。 |
 | `session_send_text`, `session_send_key` | 驱动 PTY 输入。 |
 | `session_screen`, `session_read` | 检查 PTY 屏幕或增量输出。 |
 | `session_resize`, `session_close`, `session_list` | 管理 live PTY 会话。 |
+
+### JumpServer 资产、会话与 SFTP
+
+| 工具 | 作用 |
+| --- | --- |
 | `jumpserver_asset_list`, `jumpserver_asset_accounts` | 发现当前 API 身份可见的 JumpServer 资产，或查询指定资产的非秘密账号信息。 |
 | `jumpserver_search_asset_accounts` | 按机器名/FQDN/IP 子串搜索，并在一次调用中返回匹配资产与账号元数据。 |
 | `jumpserver_session_open` | 为 JumpServer 资产/账号打开持久 PTY，并复用返回的 session ID。 |
 | `jumpserver_sftp_list`, `jumpserver_sftp_get`, `jumpserver_sftp_put`, `jumpserver_sftp_put_base64` | 通过 KoKo SFTP subsystem 列目录及传输小型文本/二进制文件。 |
 | `jumpserver_sftp_download_file`, `jumpserver_sftp_upload_file` | 在授权 JumpServer 资产和本地路径间流式传输文件，提供覆盖控制和可选 SHA-256 校验。 |
+
+### 普通 SSH SFTP
+
+| 工具 | 作用 |
+| --- | --- |
 | `sftp_list`, `sftp_get`, `sftp_put` | 普通 SSH SFTP 的 UTF-8 文本传输；不可用于 JumpServer 纳管目标。 |
 | `sftp_download_file`, `sftp_upload_file` | 普通 SSH SFTP 的大文件流式传输，支持覆盖控制与 SHA-256 校验。 |
 | `sftp_get_base64`, `sftp_put_base64` | 普通 SSH SFTP 小型二进制 base64 传输。 |
+
+### Vault 安全与 TOTP
+
+| 功能/工具 | 作用 |
+| --- | --- |
+| Web Vault 安全设置 | 使用 QR 码或手动密钥绑定 TOTP；验证码确认后生效。换绑和解绑要求重新输入主密码。 |
+| `vault_unlock_totp` | 使用 RFC 6238 六位验证码解锁已启用 TOTP 的 Vault；验证码由用户提供，不猜测或自动重试。 |
+
+TOTP 是 Vault 的可选解锁保护，不是 SSH 登录 MFA。`vault.db` 与独立密钥
+`totp.key` 必须一起备份；密钥缺失时会失败关闭。
+## Vault TOTP 双因素保护
+
+Vault 可选使用 TOTP 作为解锁的第二因素。首次绑定在 Web 安全设置中生成本地二维码或可复制密钥，输入当前六位验证码确认后生效。换绑、解绑均要求重新输入主密码；在新绑定确认前，旧绑定仍有效。TOTP 也可通过 `vault_unlock_totp` 工具解锁 Vault。
+
+TOTP 使用 RFC 6238 动态验证码，不是 SSH 登录 MFA，也不替代 Vault 主密码。每次验证码必须由用户当前提供；不要猜测或自动重试。`vault.db` 与独立的 root-only `totp.key` 必须一起备份，缺少密钥时系统失败关闭，不会自动重建。
 
 ## 主机凭据参数结构
 

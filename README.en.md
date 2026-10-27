@@ -230,6 +230,12 @@ Security properties:
 
 ## Tools
 
+MCP tools are grouped below by host management, sessions, JumpServer, SFTP, and
+Vault security. The Vault security UI also supports TOTP enrollment, verification,
+rebind, and disable; see the security section below.
+
+### Host Management and Sessions
+
 | Tool | Purpose |
 | --- | --- |
 | `host_list` | List configured hosts with redacted metadata and connection status. |
@@ -240,14 +246,39 @@ Security properties:
 | `session_send_text`, `session_send_key` | Drive PTY input. |
 | `session_screen`, `session_read` | Inspect PTY screen or incremental output. |
 | `session_resize`, `session_close`, `session_list` | Manage live PTY sessions. |
+
+### JumpServer Assets, Sessions, and SFTP
+
+| Tool | Purpose |
+| --- | --- |
 | `jumpserver_asset_list`, `jumpserver_asset_accounts` | Discover visible JumpServer assets or list non-secret accounts for a known asset ID. |
 | `jumpserver_search_asset_accounts` | Search assets by machine-name/FQDN/IP substring and return matching asset metadata plus account metadata in one call. |
 | `jumpserver_session_open` | Open a persistent PTY for a JumpServer asset/account; reuse its session ID. |
 | `jumpserver_sftp_list`, `jumpserver_sftp_get`, `jumpserver_sftp_put`, `jumpserver_sftp_put_base64` | Use the KoKo SFTP subsystem for directory listing and small text/binary files. |
 | `jumpserver_sftp_download_file`, `jumpserver_sftp_upload_file` | Stream files between an authorized JumpServer asset and a local path, with overwrite controls and optional SHA-256 verification. |
+
+### Ordinary SSH SFTP
+
+| Tool | Purpose |
+| --- | --- |
 | `sftp_list`, `sftp_get`, `sftp_put` | Transfer UTF-8 text files over ordinary SSH SFTP; not for JumpServer-managed targets. |
 | `sftp_download_file`, `sftp_upload_file` | Stream large binary files over ordinary SSH SFTP with overwrite control and SHA-256 verification. |
 | `sftp_get_base64`, `sftp_put_base64` | Transfer small binary payloads over ordinary SSH SFTP when content safely fits in MCP context. |
+
+### Vault Security and TOTP
+
+| Feature/tool | Purpose |
+| --- | --- |
+| Web Vault security settings | Enroll TOTP with a local QR code or copyable secret; confirm with a current code. Rebind and disable require a fresh master-password challenge. |
+| `vault_unlock_totp` | Unlock a TOTP-enabled Vault with an RFC 6238 six-digit code supplied by the user. Never guess or automatically retry codes. |
+
+TOTP is an optional Vault unlock factor, not SSH-login MFA. Back up `vault.db`
+together with the independent `totp.key`; a missing key fails closed.
+## Vault TOTP Protection
+
+Vault can optionally require a TOTP factor at unlock. Start enrollment in the Web security settings, scan the locally generated QR code or copy the secret, then enter a current six-digit code to confirm. Rebind and disable operations require a fresh master-password challenge; the old binding remains active until a new binding is confirmed. The `vault_unlock_totp` tool can also unlock a TOTP-enabled Vault.
+
+TOTP uses RFC 6238 and is not SSH-login MFA or a replacement for the Vault master password. The user must supply each current code; never guess or automatically retry. Back up `vault.db` together with the separate root-only `totp.key`. If that key is missing, the Vault fails closed and does not regenerate it automatically.
 
 ## Host Credential Shapes
 
