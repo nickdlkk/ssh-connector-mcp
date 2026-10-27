@@ -4,7 +4,26 @@ use chacha20poly1305::{XChaCha20Poly1305, XNonce, aead::{Aead, KeyInit}};
 use hmac::{Hmac, Mac};
 use rusqlite::OptionalExtension;
 use sha1::Sha1;
-use std::{fs::{self, OpenOptions}, io::Write, os::unix::fs::{OpenOptionsExt, PermissionsExt}, path::{Path, PathBuf}, sync::Mutex, time::{SystemTime, UNIX_EPOCH}};
+use std::{fs::{self, OpenOptions}, io::Write, path::{Path, PathBuf}, sync::Mutex, time::{SystemTime, UNIX_EPOCH}};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::LocalFree,
+    Security::{
+        DACL_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION,
+        SetFileSecurityW,
+    },
+    Security::Authorization::{
+        ConvertSecurityDescriptorToStringSecurityDescriptorW,
+        ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        GetNamedSecurityInfoW,
+        SE_FILE_OBJECT,
+    },
+};
 use zeroize::Zeroizing;
 
 type HmacSha1 = Hmac<Sha1>;
@@ -37,7 +56,7 @@ impl Totp {
         let enabled: i64 = conn.query_row("SELECT enabled FROM vault_totp_meta WHERE id=1", [], |r| r.get(0)).optional()?.unwrap_or(0);
         if enabled != 0 {
             let metadata=fs::symlink_metadata(&key_path).map_err(|_|ConnectorError::new(crate::error::ErrorCode::TotpUnavailable,"TOTP key unavailable"))?;
-            if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.permissions().mode() & 0o077 != 0 {
+            if !metadata.is_file() || metadata.file_type().is_symlink() || !private_key_permissions(&key_path, &metadata)? {
                 return Err(ConnectorError::new(crate::error::ErrorCode::TotpUnavailable,"TOTP key unavailable"));
             }
         }
@@ -173,19 +192,108 @@ impl Totp {
     }
 }
 
+
+fn private_key_permissions(path: &Path, metadata: &fs::Metadata) -> Result<bool> {
+    #[cfg(unix)]
+    { let _ = path; Ok(metadata.permissions().mode() & 0o077 == 0) }
+    #[cfg(windows)]
+    { let _ = metadata; windows_private_acl_matches(path) }
+    #[cfg(not(any(unix, windows)))]
+    { let _ = (path, metadata); Ok(false) }
+}
+
+fn apply_private_directory_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    { fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|e| ConnectorError::internal(format!("TOTP key directory permissions: {e}"))) }
+    #[cfg(windows)]
+    { apply_private_acl(path) }
+    #[cfg(not(any(unix, windows)))]
+    { let _ = path; Err(ConnectorError::internal("secure TOTP key permissions unsupported on this platform")) }
+}
+
+fn apply_private_file_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    { let _ = path; Ok(()) }
+    #[cfg(windows)]
+    { apply_private_acl(path) }
+    #[cfg(not(any(unix, windows)))]
+    { let _ = path; Err(ConnectorError::internal("secure TOTP key permissions unsupported on this platform")) }
+}
+
+#[cfg(windows)]
+fn current_user_sid_string() -> Result<String> {
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    let mut token = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(ConnectorError::internal(format!("TOTP key token query: {}", std::io::Error::last_os_error())));
+    }
+    let mut required = 0u32;
+    unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut required); }
+    if required == 0 { unsafe { windows_sys::Win32::Foundation::CloseHandle(token); } return Err(ConnectorError::internal("TOTP key token unavailable")); }
+    let mut buffer = vec![0u8; required as usize];
+    let got = unsafe { GetTokenInformation(token, TokenUser, buffer.as_mut_ptr().cast(), required, &mut required) };
+    unsafe { windows_sys::Win32::Foundation::CloseHandle(token); }
+    if got == 0 { return Err(ConnectorError::internal(format!("TOTP key token read: {}", std::io::Error::last_os_error()))); }
+    let user = unsafe { &*(buffer.as_ptr().cast::<TOKEN_USER>()) };
+    let mut sid = std::ptr::null_mut();
+    if unsafe { windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW(user.User.Sid, &mut sid) } == 0 {
+        return Err(ConnectorError::internal(format!("TOTP key SID conversion: {}", std::io::Error::last_os_error())));
+    }
+    let mut len=0usize; unsafe { while *sid.add(len) != 0 { len += 1; } }
+    let text = unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(sid, len)) };
+    unsafe { LocalFree(sid.cast()); }
+    Ok(text)
+}
+
+#[cfg(windows)]
+fn apply_private_acl(path: &Path) -> Result<()> {
+    let sddl = format!("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{})", current_user_sid_string()?);
+    let descriptor: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut security_descriptor = std::ptr::null_mut();
+    let mut descriptor_size = 0u32;
+    let converted = unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(descriptor.as_ptr(), 1, &mut security_descriptor, &mut descriptor_size) };
+    if converted == 0 { return Err(ConnectorError::internal(format!("TOTP key security descriptor: {}", std::io::Error::last_os_error()))); }
+    let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let secured = unsafe { SetFileSecurityW(wide_path.as_ptr(), DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, security_descriptor) };
+    unsafe { LocalFree(security_descriptor); }
+    if secured == 0 { return Err(ConnectorError::internal(format!("TOTP key ACL apply: {}", std::io::Error::last_os_error()))); }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_private_acl_matches(path: &Path) -> Result<bool> {
+    let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let mut owner=std::ptr::null_mut(); let mut group=std::ptr::null_mut(); let mut dacl=std::ptr::null_mut(); let mut descriptor=std::ptr::null_mut();
+    let status = unsafe { GetNamedSecurityInfoW(wide_path.as_ptr(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, &mut owner, &mut group, &mut dacl, std::ptr::null_mut(), &mut descriptor) };
+    if status != 0 || descriptor.is_null() { return Err(ConnectorError::new(crate::error::ErrorCode::TotpUnavailable,"TOTP key unavailable")); }
+    let mut sddl=std::ptr::null_mut(); let mut chars=0u32;
+    let converted = unsafe { ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor, 1, DACL_SECURITY_INFORMATION, &mut sddl, &mut chars) };
+    unsafe { LocalFree(descriptor); }
+    if converted == 0 || sddl.is_null() { return Err(ConnectorError::new(crate::error::ErrorCode::TotpUnavailable,"TOTP key unavailable")); }
+    let actual = unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(sddl, chars.saturating_sub(1) as usize)) };
+    unsafe { LocalFree(sddl.cast()); }
+    Ok(actual.starts_with("D:P") && actual.contains("(A;;FA;;;SY)") && actual.contains("(A;;FA;;;BA)") && actual.contains(&format!("(A;;FA;;;{})", current_user_sid_string()?)))
+}
+
 fn load_or_create_key(path: &Path) -> Result<[u8; KEY_LEN]> {
     if path.exists() {
         let metadata=fs::symlink_metadata(path).map_err(|_|ConnectorError::new(crate::error::ErrorCode::TotpUnavailable,"TOTP key unavailable"))?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.permissions().mode() & 0o077 != 0 {
+        if !metadata.is_file() || metadata.file_type().is_symlink() || !private_key_permissions(path, &metadata)? {
             return Err(ConnectorError::new(crate::error::ErrorCode::TotpUnavailable,"TOTP key unavailable"));
         }
         let bytes=fs::read(path).map_err(|_|ConnectorError::new(crate::error::ErrorCode::TotpUnavailable,"TOTP key unavailable"))?;
         if bytes.len()!=KEY_LEN { return Err(ConnectorError::new(crate::error::ErrorCode::TotpUnavailable,"TOTP key unavailable")); }
         let mut key=[0u8;KEY_LEN]; key.copy_from_slice(&bytes); return Ok(key);
     }
-    if let Some(parent)=path.parent() { fs::create_dir_all(parent).map_err(|e| ConnectorError::internal(format!("TOTP key directory: {e}")))?; fs::set_permissions(parent,fs::Permissions::from_mode(0o700)).map_err(|e| ConnectorError::internal(format!("TOTP key directory permissions: {e}")))?; }
+    if let Some(parent)=path.parent() { fs::create_dir_all(parent).map_err(|e| ConnectorError::internal(format!("TOTP key directory: {e}")))?; apply_private_directory_permissions(parent)?; }
     let mut key=[0u8;KEY_LEN]; getrandom::fill(&mut key).map_err(|e| ConnectorError::internal(format!("rng: {e}")))?;
-    let mut file=OpenOptions::new().write(true).create_new(true).mode(0o600).open(path).map_err(|e| ConnectorError::internal(format!("TOTP key create: {e}")))?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file=options.open(path).map_err(|e| ConnectorError::internal(format!("TOTP key create: {e}")))?;
+    apply_private_file_permissions(path)?;
     file.write_all(&key).and_then(|_|file.sync_all()).map_err(|e| ConnectorError::internal(format!("TOTP key write: {e}")))?;
     Ok(key)
 }

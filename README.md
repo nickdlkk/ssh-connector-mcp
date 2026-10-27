@@ -49,7 +49,7 @@ SSH Connector MCP separates these responsibilities:
 The recommended production shape is a local daemon plus a Streamable HTTP MCP endpoint:
 
 ```bash
-cargo install --git https://github.com/nickdlkk/ssh-connector-mcp --tag v0.1.4 ssh-connector --locked
+cargo install --git https://github.com/nickdlkk/ssh-connector-mcp --tag v0.1.5 ssh-connector --locked
 ssh-connector --data-dir ~/.ssh-connector
 ```
 
@@ -67,7 +67,7 @@ extract `ssh-connector.exe`, and run:
 
 Use the accompanying `SHA256SUMS` file to verify the downloaded archive.
 The release workflow is defined in `.github/workflows/release.yml` and runs
-when a `v*.*.*` tag is pushed. Release v0.1.4 adds JumpServer KoKo SFTP tools
+when a `v*.*.*` tag is pushed. Release v0.1.5 fixes Windows MSVC Release builds and tests by using platform-native temporary paths and restricted Windows ACLs for the TOTP wrapping key. Release v0.1.4 adds JumpServer KoKo SFTP tools
 for listing, reading, writing, and streaming file transfers; the
 `jumpserver_search_asset_accounts` tool searches by machine-name/FQDN/IP
 fragment and returns matching host/account metadata in one call. It also

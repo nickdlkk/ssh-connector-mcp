@@ -49,7 +49,7 @@ SSH Connector MCP 把职责拆开：
 推荐的生产形态是本地 daemon + Streamable HTTP MCP endpoint：
 
 ```bash
-cargo install --git https://github.com/nickdlkk/ssh-connector-mcp --tag v0.1.4 ssh-connector --locked
+cargo install --git https://github.com/nickdlkk/ssh-connector-mcp --tag v0.1.5 ssh-connector --locked
 ssh-connector --data-dir ~/.ssh-connector
 ```
 
@@ -68,7 +68,7 @@ ssh-connector --data-dir ~/.ssh-connector
 
 可使用同一 Release 中的 `SHA256SUMS` 校验下载文件。发布工作流位于
 `.github/workflows/release.yml`，推送 `v*.*.*` 标签后会自动构建并发布。
-v0.1.4 新增 JumpServer KoKo SFTP 文件工具，以及按机器名/FQDN/IP 一次搜索
+v0.1.5 修复 Windows MSVC Release 编译与测试：本地 SFTP 使用平台原生临时目录，TOTP 包装密钥使用受限 Windows ACL。v0.1.4 新增 JumpServer KoKo SFTP 文件工具，以及按机器名/FQDN/IP 一次搜索
 资产和账号元数据的 `jumpserver_search_asset_accounts`；同时包含本 README
 记录的 JumpServer 访问策略与 Vault TOTP/安全更新。账号凭据不会返回给 MCP。
 
