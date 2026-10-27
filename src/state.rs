@@ -597,7 +597,11 @@ mod jumpserver_exec_policy_tests {
         use crate::{audit::AuditLog, config::Config, state::AppState, totp::Totp, vault::Vault};
         use std::sync::Arc;
 
-        let dir = std::env::temp_dir().join(format!("jms-sftp-policy-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "jms-sftp-policy-{}-{}",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let vault = Arc::new(Vault::open(&dir.join("vault.db")).unwrap());
         vault.init("test password").unwrap();
@@ -612,8 +616,10 @@ mod jumpserver_exec_policy_tests {
         assert_eq!(state.sftp_download_file(id, "/etc/hostname", "/tmp/jms-policy-test", false, false, 65536, true).await.unwrap_err().code, crate::error::ErrorCode::JumpServerSessionRequired);
         assert_eq!(state.sftp_upload_file(id, "/etc/hostname", "/tmp/no-write", false, false, 65536, true).await.unwrap_err().code, crate::error::ErrorCode::JumpServerSessionRequired);
         assert!(state.list_sessions().await.is_empty());
-
-        std::fs::remove_dir_all(dir).unwrap();
+        drop(state);
+        // SQLite/AV scanners on Windows may transiently retain handles; the
+        // unique temp directory is disposable and must not make policy checks flaky.
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -622,10 +628,16 @@ fn allowed_local_roots() -> Result<Vec<PathBuf>> {
         .map_err(|e| ConnectorError::internal(format!("read current dir: {e}")))?
         .canonicalize()
         .map_err(|e| ConnectorError::internal(format!("canonicalize current dir: {e}")))?;
-    let tmp = Path::new("/tmp")
+    let temp_root = std::env::temp_dir()
         .canonicalize()
-        .map_err(|e| ConnectorError::internal(format!("canonicalize /tmp: {e}")))?;
-    Ok(vec![tmp, cwd])
+        .map_err(|e| ConnectorError::internal(format!("canonicalize system temp directory: {e}")))?;
+    #[cfg(windows)]
+    let temp_roots = vec![temp_root.clone(), PathBuf::from("C:/Windows/SystemTemp")];
+    #[cfg(not(windows))]
+    let temp_roots = vec![temp_root.clone()];
+    let mut roots = temp_roots;
+    roots.push(cwd);
+    Ok(roots)
 }
 
 fn is_allowed_local_path(path: &Path) -> Result<bool> {
@@ -777,7 +789,12 @@ fn lexical_local_path(path: &str) -> Result<PathBuf> {
 fn is_lexically_allowed_local_path(path: &Path) -> Result<bool> {
     let cwd = std::env::current_dir()
         .map_err(|e| ConnectorError::internal(format!("read current dir: {e}")))?;
-    Ok(path.starts_with("/tmp") || path.starts_with("/private/tmp") || path.starts_with(cwd))
+    let temp_root = std::env::temp_dir();
+    #[cfg(windows)]
+    let system_temp = PathBuf::from("C:/Windows/SystemTemp");
+    #[cfg(not(windows))]
+    let system_temp = temp_root.clone();
+    Ok(path.starts_with(&temp_root) || path.starts_with(system_temp) || path.starts_with(cwd))
 }
 
 #[cfg(test)]
@@ -791,8 +808,17 @@ mod tests {
 
     #[test]
     fn allows_tmp_write_paths() {
-        let path = allowed_local_write_path("/tmp/ssh-connector-test.bin", true).unwrap();
-        assert!(path.starts_with(Path::new("/tmp")) || path.starts_with(Path::new("/private/tmp")));
+        let temp_root = std::env::temp_dir();
+        let path = temp_root.join("ssh-connector-test.bin");
+        let path = allowed_local_write_path(path.to_str().unwrap(), true).unwrap();
+        assert!(
+            path.to_string_lossy()
+                .to_ascii_lowercase()
+                .starts_with("\\\\?\\c:\\windows\\systemtemp\\")
+                || path.to_string_lossy().to_ascii_lowercase().starts_with(
+                    &temp_root.to_string_lossy().to_ascii_lowercase()
+                )
+        );
     }
 
     #[test]
@@ -803,21 +829,25 @@ mod tests {
 
     #[test]
     fn creates_nested_tmp_parent_when_requested() {
-        let unique = format!(
-            "/tmp/ssh-connector-state-test-{}/nested/file.bin",
-            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
-        );
-        let path = allowed_local_write_path(&unique, true).unwrap();
+        let temp_root = std::env::temp_dir();
+        let test_root = temp_root.join(format!("ssh-connector-state-test-{}", time::OffsetDateTime::now_utc().unix_timestamp_nanos()));
+        let unique = test_root.join("nested").join("file.bin");
+        let path = allowed_local_write_path(unique.to_str().unwrap(), true).unwrap();
         assert!(path.parent().unwrap().is_dir());
-        std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap()).unwrap();
+        std::fs::remove_dir_all(test_root).unwrap();
     }
 
     #[test]
     fn rejects_local_parent_traversal() {
-        let error = allowed_local_write_path("/tmp/../etc/blocked", true).unwrap_err();
+        let error = allowed_local_write_path(
+            &std::env::temp_dir().join("../etc/blocked").to_string_lossy(),
+            true,
+        )
+        .unwrap_err();
         assert_eq!(error.code, crate::error::ErrorCode::BadRequest);
     }
 
+    #[cfg(unix)]
     #[test]
     fn rejects_symlinked_parent_before_creating_outside_allowed_roots() {
         let token = time::OffsetDateTime::now_utc().unix_timestamp_nanos();

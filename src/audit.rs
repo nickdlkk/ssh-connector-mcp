@@ -373,7 +373,8 @@ mod tests {
     use super::*;
 
     fn temp_store() -> (AuditLog, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("sqlite-audit-test-{}", time::OffsetDateTime::now_utc().unix_timestamp_nanos()));
+        let dir = std::env::current_dir().unwrap().join(format!("sqlite-audit-test-{}", time::OffsetDateTime::now_utc().unix_timestamp_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
         (AuditLog::new(dir.clone()), dir)
     }
 

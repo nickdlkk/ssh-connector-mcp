@@ -1,6 +1,6 @@
 [package]
 name = "ssh-connector"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 
 [dependencies]
@@ -38,3 +38,6 @@ vt100 = "0.16.2"
 url = "2.5.8"
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 zeroize = { version = "1.8.2", features = ["derive"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }
